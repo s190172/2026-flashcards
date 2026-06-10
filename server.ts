@@ -35,15 +35,17 @@ async function startServer() {
 
       const response = await ai.models.generateContent({
         model: "gemini-3.5-flash",
-        contents: `You are an expert tutor and study data clean-up parser.
-The user uploaded raw notes, study materials, or structured data scraped from another platform.
-Process, clean, and organize the text into a clean array of high-quality learning flashcards with absolute structural integrity.
+        contents: `You are a data-formatting and spell-checking utility.
+You must extract terms and definitions from the provided input text and output them as a JSON array of objects.
 
-Tasks:
-1. Strip out unnecessary, messy HTML tags (like <b>, <i>, <br>, <a>, iframe, div, span, etc.).
-2. Correct any broken formatting, column alignments, or layout noise from scrapers.
-3. Keep the extracted term name in 'term', full definition in 'definition', and brief helper hint in 'hint'.
-4. Do NOT leave fields empty. Invent brief, logical context hints if they are omitted.
+STRICT GUIDELINES:
+1. You are strictly forbidden from adding textbook definitions, generic facts, or expanding on user input with external knowledge.
+2. Maintain the core, literal meaning of the user input. ONLY fix spelling, grammar, and formatting.
+3. If the input is a single statement (like "concrete is a tough material"), output a single array item:
+   {"term": "Concrete", "definition": "A tough material", "hint": "..."}
+4. For the 'hint' field, provide a very brief, literal contextual clue derived ONLY from the provided text. Do not invent information.
+
+Output must be a valid JSON array of objects with keys: 'term', 'definition', 'hint'.
 
 Here is the raw text materials or scraped content:
 """

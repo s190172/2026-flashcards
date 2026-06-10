@@ -13,7 +13,11 @@
         "confidence": { "type": "string", "enum": ["hard", "good", "easy", ""], "description": "Active recall level of confidence" },
         "interval": { "type": "integer", "description": "Spaced repetition interval in days" },
         "ease_factor": { "type": "number", "description": "Spaced repetition difficulty coefficient multiplier" },
-        "next_review_date": { "type": "string", "format": "date-time", "description": "Calendar ISO timestamp of next scheduled study/review time" }
+        "next_review_date": { "type": "string", "format": "date-time", "description": "Calendar ISO timestamp of next scheduled study/review time" },
+        "searchKeywords": {
+          "type": "array",
+          "description": "Lowercase prefix strings for indexing-based term searches"
+        }
       },
       "required": ["id", "userId", "term", "definition"]
     },

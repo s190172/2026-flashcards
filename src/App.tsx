@@ -32,14 +32,34 @@ import {
   Save,
   Database,
   RotateCcw,
-  Sliders
+  Sliders,
+  Volume2,
+  GripVertical
 } from "lucide-react";
+import { 
+  DndContext, 
+  closestCorners,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core';
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  verticalListSortingStrategy,
+  rectSortingStrategy,
+  useSortable,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import { jsPDF } from "jspdf";
 
 // Firebase imports
 import { auth, db } from "./firebase";
 import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut } from "firebase/auth";
-import { collection, doc, setDoc, deleteDoc, getDocs, onSnapshot, query, where, getDoc } from "firebase/firestore";
+import { collection, doc, setDoc, deleteDoc, getDocs, onSnapshot, query, where, getDoc, writeBatch } from "firebase/firestore";
+import firebaseConfig from "../firebase-applet-config.json";
 
 enum OperationType {
   CREATE = 'create',
@@ -88,6 +108,17 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
   throw new Error(JSON.stringify(errInfo));
 }
 
+// Generate lowercase search prefixes for term search indexing
+const generateSearchKeywords = (term: string): string[] => {
+  if (!term) return [];
+  const clean = term.trim().toLowerCase();
+  const result: string[] = [];
+  for (let i = 1; i <= clean.length; i++) {
+    result.push(clean.substring(0, i));
+  }
+  return result;
+};
+
 interface Flashcard {
   id: string;
   term: string;
@@ -97,6 +128,8 @@ interface Flashcard {
   interval?: number;
   ease_factor?: number;
   next_review_date?: string;
+  isMastered?: boolean;
+  searchKeywords?: string[];
 }
 
 interface ExamQuestion {
@@ -155,7 +188,440 @@ const DEFAULT_CARDS: Flashcard[] = [
   }
 ];
 
+
+// Sortable card item for the main Deck Inventory Configuration grid
+function SortableFlashcardItem({ 
+  card, 
+  originalIndex, 
+  handleDeleteCard, 
+  isDark, 
+  stylesObj 
+}: { 
+  card: Flashcard; 
+  originalIndex: number; 
+  handleDeleteCard: (id: string) => void; 
+  isDark: boolean; 
+  stylesObj: any;
+  key?: string | number;
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: card.id });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition: isDragging ? 'none' : transition,
+    zIndex: isDragging ? 50 : undefined,
+    opacity: isDragging ? 0.6 : 1,
+  };
+
+  const confidenceColorStyle = card.confidence === "easy" 
+    ? (isDark ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" : "bg-emerald-100 text-emerald-950 border border-emerald-400")
+    : card.confidence === "hard" 
+    ? (isDark ? "bg-rose-500/10 text-rose-400 border border-rose-500/20" : "bg-rose-100 text-rose-950 border border-rose-400")
+    : (isDark ? "bg-indigo-500/10 text-indigo-300 border border-indigo-500/20" : "bg-indigo-100 text-indigo-950 border border-indigo-400");
+
+  const cardBgStyle = isDragging 
+    ? (isDark ? "bg-slate-900 border-indigo-500 shadow-2xl relative cursor-grabbing" : "bg-white border-indigo-600 shadow-2xl relative cursor-grabbing")
+    : (isDark ? "bg-slate-950 border-slate-900/80 hover:border-slate-800 hover:shadow-md cursor-grab animate-fade-in" : "bg-white border-slate-200/90 hover:border-indigo-400 hover:shadow-md cursor-grab animate-fade-in");
+
+  return (
+    <div 
+      ref={setNodeRef}
+      style={style}
+      className={`p-4 rounded-xl flex justify-between items-start gap-3 ${isDragging ? '' : 'transition-all'} text-xs border select-none ${cardBgStyle}`}
+      {...attributes}
+      {...listeners}
+    >
+      <div className="flex gap-2 items-start flex-1 min-w-0">
+        {/* Visual Grab Handle Indicator */}
+        <div 
+          className="text-slate-500 hover:text-indigo-400 p-1 rounded mt-0.5 shrink-0 transition-colors"
+          title="Drag and drop card to reorder"
+        >
+          <GripVertical className="w-4 h-4" />
+        </div>
+
+        <div className="space-y-1 flex-1 min-w-0 text-left">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className={`font-mono text-[10px] uppercase tracking-wider font-semibold ${isDark ? "text-indigo-400" : "text-indigo-700"}`}>
+              #{originalIndex + 1} Term
+            </span>
+            {card.confidence && (
+              <span className={`px-2 py-0.2 rounded text-[8px] font-mono font-semibold uppercase ${confidenceColorStyle}`}>
+                {card.confidence}
+              </span>
+            )}
+          </div>
+          <h5 className={`font-bold text-sm selection:bg-indigo-500/30 break-words ${isDark ? "text-white" : "text-slate-950"}`}>
+            {card.term}
+          </h5>
+          <p className={`${isDark ? "text-slate-400" : "text-slate-800"} selection:bg-indigo-500/30 leading-snug break-words`}>
+            {card.definition}
+          </p>
+          {card.hint && (
+            <p className="text-[10px] text-slate-500 selection:bg-indigo-500/30 italic break-words">
+              Hint: {card.hint}
+            </p>
+          )}
+        </div>
+      </div>
+
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          handleDeleteCard(card.id);
+        }}
+        onPointerDown={(e) => {
+          e.stopPropagation();
+        }}
+        className="text-slate-550 hover:text-rose-550 dark:text-slate-500 dark:hover:text-rose-400 p-1.5 rounded-lg hover:bg-rose-500/10 transition-all cursor-pointer shrink-0 mt-0.5 relative z-20"
+        title="Delete this study card"
+      >
+        <Trash2 className="w-4 h-4" />
+      </button>
+    </div>
+  );
+}
+
+// ==========================================
+// CLIENT-FIRST DATABASE STATUS TESTER DIAGNOSTIC COMPONENT
+// ==========================================
+function DatabaseStatusTester({ 
+  user, 
+  isDark, 
+  stylesObj,
+  showToast
+}: { 
+  user: any; 
+  isDark: boolean; 
+  stylesObj: any;
+  showToast: (msg: string, type: "success" | "error" | "info") => void;
+}) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [dbCards, setDbCards] = useState<any[]>([]);
+  const [rawGlobalResult, setRawGlobalResult] = useState<{ success: boolean; count: number; error?: string } | null>(null);
+
+  // Fetch current user's cards from original database
+  const fetchUserCards = async () => {
+    if (!user) {
+      setError("No user authenticated. Authenticated session is required by secure security rules.");
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const q = query(collection(db, "cards"), where("userId", "==", user.uid));
+      const snapshot = await getDocs(q);
+      const items = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setDbCards(items);
+      showToast("Cloud user cards retrieved successfully!", "success");
+    } catch (err: any) {
+      console.error(err);
+      setError(err?.message || "Failed to retrieve cards");
+      showToast("Failed to retrieve cards: Missing or Insufficient Permissions.", "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Test Raw Global Collection (gets blocked by custom rules if not owner, demonstrating security!)
+  const testRawGlobalFetch = async () => {
+    setLoading(true);
+    setRawGlobalResult(null);
+    try {
+      const snapshot = await getDocs(collection(db, "cards"));
+      setRawGlobalResult({
+        success: true,
+        count: snapshot.size
+      });
+      showToast("Raw global fetch succeeded (Warning: check rules privacy, should be blocked!)", "info");
+    } catch (err: any) {
+      console.error(err);
+      setRawGlobalResult({
+        success: false,
+        count: 0,
+        error: err?.message || "Permission Denied"
+      });
+      showToast("Security Active: Raw global get rejected as expected.", "success");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Create a synthetic debug test card
+  const handleCreateTestCard = async () => {
+    if (!user) {
+      showToast("Must be signed in to verify database write authorization.", "error");
+      return;
+    }
+    setLoading(true);
+    try {
+      const id = "test_" + Date.now();
+      const testCard = {
+        id,
+        userId: user.uid,
+        term: "💡 Db Status Test Term",
+        definition: "This is a successful client-side Firestore synchronization test card generated at " + new Date().toLocaleTimeString(),
+        confidence: "",
+        interval: 0,
+        ease_factor: 2.5,
+        next_review_date: new Date().toISOString()
+      };
+      await setDoc(doc(db, "cards", id), testCard);
+      showToast("Test card stored successfully in cloud!", "success");
+      // refresh user list
+      await fetchUserCards();
+    } catch (err: any) {
+      showToast("Failed to store test card in cloud: " + (err.message || err), "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Delete test card
+  const handleDeleteTestCard = async (id: string) => {
+    setLoading(true);
+    try {
+      await deleteDoc(doc(db, "cards", id));
+      showToast("Test card eliminated from database.", "success");
+      await fetchUserCards();
+    } catch (err: any) {
+      showToast("Failed to delete test card: " + (err.message || err), "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (user) {
+      fetchUserCards();
+    }
+  }, [user]);
+
+  return (
+    <div className="space-y-6">
+      {/* Header Info */}
+      <div className={`${stylesObj.panelBg} rounded-xl border p-6 space-y-4`}>
+        <div className="flex justify-between items-start flex-wrap gap-4">
+          <div>
+            <h3 className={`text-base font-bold ${stylesObj.textHeading} flex items-center gap-2`}>
+              🔧 Client-First Database Status Tester & Admin Panel
+            </h3>
+            <p className={`text-xs ${stylesObj.textMuted} font-sans`}>
+              Bypass Google Cloud Console dashboard bugs by verifying connection states, inspecting collections, and monitoring synchronization layers.
+            </p>
+          </div>
+          <span className={`px-2.5 py-1 rounded-full text-xs font-mono font-bold uppercase flex items-center gap-1 bg-indigo-500/10 text-indigo-500`}>
+            🧪 Admin Mode
+          </span>
+        </div>
+
+        {/* Configurations Grid */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div className={`${isDark ? "bg-slate-950/60" : "bg-slate-100"} p-4 rounded-xl border ${stylesObj.border} space-y-1.5`}>
+            <p className={`text-[10px] font-mono uppercase font-bold tracking-wider ${stylesObj.textMuted}`}>Active Firebase Credentials</p>
+            <div className="text-xs space-y-1 font-mono">
+              <div className="flex justify-between">
+                <span className={`${stylesObj.textMuted}`}>Project ID:</span>
+                <span className={`font-semibold ${stylesObj.textLight}`}>{firebaseConfig.projectId}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className={`${stylesObj.textMuted}`}>Database ID:</span>
+                <span className={`font-semibold text-indigo-500 truncate max-w-[150px]`} title="(default) - Standard Main Database">
+                  (default)
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className={`${stylesObj.textMuted}`}>Auth Domain:</span>
+                <span className={`font-semibold ${stylesObj.textLight} truncate max-w-[150px]`}>{firebaseConfig.authDomain}</span>
+              </div>
+            </div>
+          </div>
+
+          <div className={`${isDark ? "bg-slate-950/60" : "bg-slate-100"} p-4 rounded-xl border ${stylesObj.border} space-y-1.5`}>
+            <p className={`text-[10px] font-mono uppercase font-bold tracking-wider ${stylesObj.textMuted}`}>Authentication & Authority</p>
+            <div className="text-xs space-y-1 font-mono">
+              <div className="flex justify-between">
+                <span className={`${stylesObj.textMuted}`}>Auth State:</span>
+                <span className={`font-semibold ${user ? "text-emerald-500" : "text-amber-500"}`}>{user ? "SIGNED IN" : "SIGNED OUT"}</span>
+              </div>
+              {user && (
+                <>
+                  <div className="flex justify-between">
+                    <span className={`${stylesObj.textMuted}`}>Unique UID:</span>
+                    <span className={`font-semibold ${stylesObj.textLight} truncate max-w-[150px]`} title={user.uid}>{user.uid}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className={`${stylesObj.textMuted}`}>Account E-mail:</span>
+                    <span className={`font-semibold ${stylesObj.textLight} truncate max-w-[150px]`}>{user.email}</span>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className={`${isDark ? "bg-slate-950/60" : "bg-slate-100"} p-4 rounded-xl border ${stylesObj.border} space-y-1.5`}>
+            <p className={`text-[10px] font-mono uppercase font-bold tracking-wider ${stylesObj.textMuted}`}>Query Diagnostics</p>
+            <div className="text-xs space-y-1">
+              <div className="flex justify-between">
+                <span className={`font-mono text-[11px] ${stylesObj.textMuted}`}>Cards loaded locally:</span>
+                <span className={`font-mono font-bold ${stylesObj.textLight}`}>{dbCards.length} docs</span>
+              </div>
+              <div className="flex gap-2 mt-2">
+                <button
+                  onClick={fetchUserCards}
+                  disabled={loading}
+                  className="flex-1 py-1 px-2 text-[10px] font-bold uppercase bg-indigo-600 text-white rounded hover:bg-indigo-500 cursor-pointer disabled:opacity-50"
+                >
+                  Reload User
+                </button>
+                <button
+                  onClick={testRawGlobalFetch}
+                  disabled={loading}
+                  className="flex-1 py-1 px-2 text-[10px] font-bold uppercase border border-slate-700 hover:bg-slate-800 text-slate-300 rounded cursor-pointer disabled:opacity-50"
+                  title="Grabs raw collection to confirm secure rule rejection for unauthorized fields"
+                >
+                  Global Probe
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {rawGlobalResult && (
+        <div className={`p-4 rounded-xl border ${rawGlobalResult.success ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300" : "bg-rose-500/10 border-rose-500/30 text-rose-300"} font-mono text-xs animate-fade-in`}>
+          <div className="flex justify-between items-center mb-1">
+            <span className="font-bold">🚨 Global DB Probe Diagnosis:</span>
+            <button onClick={() => setRawGlobalResult(null)} className="text-slate-400 hover:text-white">✕</button>
+          </div>
+          {rawGlobalResult.success ? (
+            <p>SUCCESSFUL PROBE. Found {rawGlobalResult.count} total documents in the database. Warning: This indicates security rules do not restrict list operations to owner-specific partitions!</p>
+          ) : (
+            <div className="space-y-1">
+              <p className="text-rose-400 font-bold">REJECTED SECURELY (Expected Rule Action):</p>
+              <p className="text-[11px] break-words text-slate-300 bg-slate-950 p-2 rounded">
+                {rawGlobalResult.error}
+              </p>
+              <p className="text-[10px] text-slate-450 font-sans mt-1">Excellent! The Firestore list security rules successfully blocked an unpartitioned client query. This verifies that your data partitions are protected against leak attacks!</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Main Database Table & List */}
+      <div className={`${stylesObj.panelBg} rounded-xl border p-6 space-y-4`}>
+        <div className="flex justify-between items-center flex-wrap gap-4">
+          <div>
+            <h4 className={`text-sm font-bold ${stylesObj.textHeading} flex items-center gap-1.5`}>
+              📂 Document Records: <code className="text-indigo-400 font-mono font-bold">cards</code> collection ({dbCards.length} cards total)
+            </h4>
+            <p className={`text-xs ${stylesObj.textMuted} font-sans`}>
+              Showing raw records registered for the current synchronized UID partition.
+            </p>
+          </div>
+          <button
+            onClick={handleCreateTestCard}
+            disabled={loading}
+            className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 transition-all shadow-md active:scale-95 cursor-pointer"
+          >
+            ➕ Post Debug Card
+          </button>
+        </div>
+
+        {error && (
+          <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-xs text-rose-400 font-mono whitespace-pre-wrap">
+            {error}
+          </div>
+        )}
+
+        {loading && dbCards.length === 0 ? (
+          <div className="p-12 text-center text-xs text-slate-400 font-mono space-y-2">
+            <div className="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto" />
+            <p>Executing fetch from cloud firestore endpoint (Region configured)...</p>
+          </div>
+        ) : dbCards.length === 0 ? (
+          <div className={`p-12 text-center rounded-xl border ${stylesObj.border} border-dashed`}>
+            <p className={`text-xs ${stylesObj.textMuted}`}>No cloud card references. Connect with Google or persist some cards, or press "Post Debug Card" to test write actions!</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto rounded-xl border border-slate-800/60">
+            <table className="w-full text-left text-xs font-mono">
+              <thead className={`${isDark ? "bg-slate-950" : "bg-slate-100"} text-slate-400 text-[10px] uppercase font-bold border-b border-slate-850`}>
+                <tr>
+                  <th className="p-3">Doc ID</th>
+                  <th className="p-3">User ID (Owner)</th>
+                  <th className="p-3">Term</th>
+                  <th className="p-3">Definition Summary</th>
+                  <th className="p-3 text-right">Operations</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/40">
+                {dbCards.map((card) => (
+                  <tr key={card.id} className={`${isDark ? "hover:bg-slate-900/40" : "hover:bg-slate-100/50"} transition-colors`}>
+                    <td className="p-3 max-w-[120px] truncate font-semibold text-slate-400" title={card.id}>
+                      {card.id}
+                    </td>
+                    <td className="p-3 max-w-[100px] truncate text-slate-500 text-[10px]" title={card.userId}>
+                      {card.userId}
+                    </td>
+                    <td className={`p-3 max-w-[140px] truncate font-bold ${stylesObj.textHeading}`}>
+                      {card.term}
+                    </td>
+                    <td className="p-3 max-w-[200px] truncate text-slate-400">
+                      {card.definition}
+                    </td>
+                    <td className="p-3 text-right">
+                      <button
+                        onClick={() => handleDeleteTestCard(card.id)}
+                        className="py-1 px-2.5 rounded bg-rose-500/10 text-rose-455 border border-rose-500/20 hover:bg-rose-500/20 hover:text-rose-400 text-[10px] cursor-pointer"
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 5,
+      },
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    })
+  );
+
+  function handleDragEnd(event: any) {
+    const { active, over } = event;
+    
+    if (active.id !== over?.id) {
+      setCards((items) => {
+        const oldIndex = items.findIndex(c => c.id === active.id);
+        const newIndex = items.findIndex(c => c.id === over.id);
+        
+        return arrayMove(items, oldIndex, newIndex);
+      });
+    }
+  }
+
   // Theme Configuration (Light vs Dark with high contrast support)
   const [theme, setTheme] = useState<"light" | "dark">(() => {
     return (localStorage.getItem("theme") as "light" | "dark") || "dark";
@@ -192,6 +658,50 @@ export default function App() {
   const [snapshotSlot2, setSnapshotSlot2] = useState<string | null>(() => localStorage.getItem("backup_slot_2"));
   const [snapshotSlot3, setSnapshotSlot3] = useState<string | null>(() => localStorage.getItem("backup_slot_3"));
 
+  // Iframe-safe Custom Toast notifications state
+  const [toasts, setToasts] = useState<Array<{ id: string; message: string; type: 'success' | 'info' | 'error' }>>([]);
+  const showToast = (message: string, type: 'success' | 'info' | 'error' = 'success') => {
+    const id = Date.now().toString() + Math.random().toString();
+    setToasts((prev) => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 3500);
+  };
+
+  // Iframe-safe custom confirm modal state
+  const [confirmModal, setConfirmModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    confirmText: string;
+    type: 'primary' | 'danger';
+    onConfirm: () => void;
+  }>({
+    isOpen: false,
+    title: "",
+    message: "",
+    confirmText: "Confirm",
+    type: "primary",
+    onConfirm: () => {}
+  });
+
+  const triggerConfirm = (
+    title: string,
+    message: string,
+    onConfirm: () => void,
+    type: 'primary' | 'danger' = 'primary',
+    confirmText: string = 'Confirm'
+  ) => {
+    setConfirmModal({
+      isOpen: true,
+      title,
+      message,
+      confirmText,
+      type,
+      onConfirm
+    });
+  };
+
   // 1. Export JSON backup helper
   const handleExportJSONBackup = () => {
     try {
@@ -215,9 +725,10 @@ export default function App() {
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
+      showToast("JSON file backup downloaded successfully!", "success");
     } catch (err) {
       console.error("Failed to export backup: ", err);
-      alert("Error exporting JSON backup: " + (err instanceof Error ? err.message : String(err)));
+      showToast("Error exporting JSON backup: " + (err instanceof Error ? err.message : String(err)), "error");
     }
   };
 
@@ -234,31 +745,37 @@ export default function App() {
         
         // Validation checks
         if (!parsed || !Array.isArray(parsed.cards)) {
-          alert("Invalid backup file. The JSON must contain a valid cards array.");
+          showToast("Invalid backup file: missing flashcards list.", "error");
           return;
         }
 
-        if (confirm(`Restore backup with ${parsed.cards.length} cards? This will replace your current active deck.`)) {
-          await restoreDeckSource(parsed.cards);
-          
-          if (parsed.bestMatchTime !== undefined) {
-            setBestMatchTime(parsed.bestMatchTime);
-            localStorage.setItem("learning_dashboard_best_match", parsed.bestMatchTime.toString());
-          }
-          if (parsed.lightVariation !== undefined) {
-            setLightVariation(parsed.lightVariation);
-            localStorage.setItem("active_light_variation", parsed.lightVariation);
-          }
-          if (parsed.theme !== undefined) {
-            setTheme(parsed.theme);
-            localStorage.setItem("theme", parsed.theme);
-          }
+        triggerConfirm(
+          "Import JSON Backup",
+          `Restore backup with ${parsed.cards.length} cards? This will replace your current active study deck entirely.`,
+          async () => {
+            await restoreDeckSource(parsed.cards);
+            
+            if (parsed.bestMatchTime !== undefined) {
+              setBestMatchTime(parsed.bestMatchTime);
+              localStorage.setItem("learning_dashboard_best_match", parsed.bestMatchTime.toString());
+            }
+            if (parsed.lightVariation !== undefined) {
+              setLightVariation(parsed.lightVariation);
+              localStorage.setItem("active_light_variation", parsed.lightVariation);
+            }
+            if (parsed.theme !== undefined) {
+              setTheme(parsed.theme);
+              localStorage.setItem("theme", parsed.theme);
+            }
 
-          alert("Backup successfully restored!");
-        }
+            showToast("Backup successfully imported and restored!", "success");
+          },
+          "primary",
+          "Restore Deck"
+        );
       } catch (err) {
         console.error("Failed to import backup: ", err);
-        alert("Error parsing backup file: " + (err instanceof Error ? err.message : String(err)));
+        showToast("Error parsing backup file: " + (err instanceof Error ? err.message : String(err)), "error");
       }
     };
     reader.readAsText(file);
@@ -277,9 +794,19 @@ export default function App() {
         setSyncingStatus("syncing");
         const q = query(collection(db, "cards"), where("userId", "==", user.uid));
         const snapshot = await getDocs(q);
-        for (const docSnap of snapshot.docs) {
-          await deleteDoc(docSnap.ref);
+        
+        // Chunk deletions into batches of 400 (Firestore maximum is 500 per batch)
+        const docSnaps = snapshot.docs;
+        const chunkSize = 400;
+        for (let i = 0; i < docSnaps.length; i += chunkSize) {
+          const chunk = docSnaps.slice(i, i + chunkSize);
+          const batch = writeBatch(db);
+          for (const docSnap of chunk) {
+            batch.delete(docSnap.ref);
+          }
+          await batch.commit();
         }
+        
         await dbAddMultipleCards(restoredCards, user.uid);
         setSyncingStatus("synced");
       } catch (err) {
@@ -291,19 +818,27 @@ export default function App() {
 
   // 3. Save snapshot to specific local slot
   const handleSaveSnapshotSlot = (slotNum: 1 | 2 | 3) => {
-    const defaultLabel = `Deck Config (${cards.length} cards)`;
-    const label = prompt("Enter a customized label or topic name for this snapshot:", defaultLabel);
-    if (label === null) return; // user cancelled
+    const totalCount = cards.length;
+    const timeStr = new Date().toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    const dateStr = new Date().toLocaleDateString();
+    
+    // Auto design name: Deck with term count and clear timestamp, no blocking window prompt!
+    const designedName = `Study Deck (${totalCount} cards) • ${timeStr}`;
 
     const snapshotPayload = {
-      name: label.trim() || defaultLabel,
-      date: new Date().toLocaleDateString() + " " + new Date().toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }),
+      name: designedName,
+      date: dateStr + " " + timeStr,
       cards,
       bestMatchTime
     };
 
     const str = JSON.stringify(snapshotPayload);
     localStorage.setItem(`backup_slot_${slotNum}`, str);
+    
+    // Beautiful feedback indicators
+    showToast(`Snapshot Slot ${slotNum === 1 ? 'A' : slotNum === 2 ? 'B' : 'C'} saved!`, "success");
+    setSaveStatus(`Saved slot ${slotNum}!`);
+    setTimeout(() => setSaveStatus(null), 2500);
 
     if (slotNum === 1) setSnapshotSlot1(str);
     if (slotNum === 2) setSnapshotSlot2(str);
@@ -318,36 +853,50 @@ export default function App() {
     try {
       const parsed = JSON.parse(rawStr);
       if (!parsed || !Array.isArray(parsed.cards)) {
-        alert("Snapshot data is corrupt or invalid.");
+        showToast("Snapshot data is corrupt or invalid.", "error");
         return;
       }
 
-      if (confirm(`Restore snapshot "${parsed.name}"? This replaces your live web deck right now.`)) {
-        await restoreDeckSource(parsed.cards);
-        
-        if (parsed.bestMatchTime !== undefined) {
-          setBestMatchTime(parsed.bestMatchTime);
-          localStorage.setItem("learning_dashboard_best_match", parsed.bestMatchTime.toString());
-        }
-      }
+      triggerConfirm(
+        "Restore Snapshot",
+        `Do you want to restore snapshot "${parsed.name}"? This replaces your currently active learning cards setup immediately.`,
+        async () => {
+          await restoreDeckSource(parsed.cards);
+          
+          if (parsed.bestMatchTime !== undefined) {
+            setBestMatchTime(parsed.bestMatchTime);
+            localStorage.setItem("learning_dashboard_best_match", parsed.bestMatchTime.toString());
+          }
+          showToast(`Snapshot loaded: ${parsed.cards.length} cards restored!`, "success");
+        },
+        "primary",
+        "Load Snapshot"
+      );
     } catch (err) {
       console.error(err);
-      alert("Failed to restore snapshot.");
+      showToast("Failed to restore snapshot.", "error");
     }
   };
 
   // 5. Clear specific local slot
   const handleClearSnapshotSlot = (slotNum: 1 | 2 | 3) => {
-    if (confirm("Permanently delete this backup slot snapshot?")) {
-      localStorage.removeItem(`backup_slot_${slotNum}`);
-      if (slotNum === 1) setSnapshotSlot1(null);
-      if (slotNum === 2) setSnapshotSlot2(null);
-      if (slotNum === 3) setSnapshotSlot3(null);
-    }
+    triggerConfirm(
+      "Delete Snapshot Slot",
+      `Are you sure you want to permanently delete snapshot slot ${slotNum === 1 ? 'A' : slotNum === 2 ? 'B' : 'C'}? This is irreversible.`,
+      () => {
+        localStorage.removeItem(`backup_slot_${slotNum}`);
+        if (slotNum === 1) setSnapshotSlot1(null);
+        if (slotNum === 2) setSnapshotSlot2(null);
+        if (slotNum === 3) setSnapshotSlot3(null);
+        showToast("Snapshot slot cleared.", "info");
+      },
+      "danger",
+      "Delete permanently"
+    );
   };
 
   // Navigation
-  const [activeTab, setActiveTab] = useState<"flashcards" | "exam" | "match" | "setup">("flashcards");
+  const [activeTab, setActiveTab] = useState<"flashcards" | "exam" | "match" | "setup" | "debug">("flashcards");
 
   // Core Cards State
   const [cards, setCards] = useState<Flashcard[]>(() => {
@@ -421,6 +970,8 @@ export default function App() {
   const [newTerm, setNewTerm] = useState("");
   const [newDefinition, setNewDefinition] = useState("");
   const [newHint, setNewHint] = useState("");
+  const [saveStatus, setSaveStatus] = useState<string | null>(null);
+
   const [deckSearchQuery, setDeckSearchQuery] = useState("");
 
   // Raw notes text area & parsing
@@ -526,20 +1077,20 @@ export default function App() {
         badgeGreen: "bg-black text-white border-2 border-black font-semibold"
       }
     : {
-        rootBg: "bg-[#f8fafc] text-slate-900",
-        panelBg: "bg-white border-slate-200 shadow-[0_2px_12px_rgba(0,0,0,0.06)]",
-        cardPanelBg: "bg-white border-slate-200 shadow-sm",
-        subPanelBg: "bg-slate-50",
-        inputBg: "bg-white border-slate-300 text-slate-900 placeholder:text-slate-400 focus:border-indigo-600",
-        border: "border-slate-200",
-        borderAccent: "border-slate-250",
-        textMuted: "text-slate-600",
-        textLight: "text-slate-700",
-        textHeading: "text-slate-900",
-        cardFront: "from-white to-slate-50 border-slate-200 text-slate-900 shadow-lg hover:border-slate-300",
-        cardBack: "from-white to-slate-100 border-indigo-150 text-slate-900 shadow-lg hover:border-indigo-250",
-        badgeActive: "bg-indigo-50 text-indigo-700 border border-indigo-200",
-        badgeGreen: "bg-emerald-50 text-emerald-700 border border-emerald-200"
+        rootBg: "bg-slate-50 text-slate-900",
+        panelBg: "bg-white border-slate-400 shadow-[0_2px_12px_rgba(0,0,0,0.1)]",
+        cardPanelBg: "bg-white border-slate-400 shadow-sm",
+        subPanelBg: "bg-slate-100",
+        inputBg: "bg-white border-slate-500 text-slate-950 placeholder:text-slate-600 focus:border-indigo-700",
+        border: "border-slate-400",
+        borderAccent: "border-slate-500",
+        textMuted: "text-slate-800",
+        textLight: "text-slate-950",
+        textHeading: "text-slate-950 font-bold",
+        cardFront: "from-white to-slate-100 border-slate-400 text-slate-950 shadow-md hover:border-indigo-500",
+        cardBack: "from-white to-slate-200 border-indigo-500 text-slate-950 shadow-md hover:border-indigo-600",
+        badgeActive: "bg-indigo-100 text-indigo-950 border border-indigo-400",
+        badgeGreen: "bg-emerald-100 text-emerald-950 border border-emerald-400"
       };
 
   // Exam Center parameters
@@ -580,7 +1131,8 @@ export default function App() {
         term: card.term,
         definition: card.definition,
         hint: card.hint || "",
-        confidence: card.confidence || ""
+        confidence: card.confidence || "",
+        searchKeywords: generateSearchKeywords(card.term)
       };
       if (card.interval !== undefined) payload.interval = card.interval;
       if (card.ease_factor !== undefined) payload.ease_factor = card.ease_factor;
@@ -608,21 +1160,28 @@ export default function App() {
     const activeUid = currentUid || user?.uid;
     if (!activeUid) return;
     try {
-      for (const card of newCards) {
-        const docRef = doc(db, "cards", card.id);
-        const payload: any = {
-          id: card.id,
-          userId: activeUid,
-          term: card.term,
-          definition: card.definition,
-          hint: card.hint || "",
-          confidence: card.confidence || ""
-        };
-        if (card.interval !== undefined) payload.interval = card.interval;
-        if (card.ease_factor !== undefined) payload.ease_factor = card.ease_factor;
-        if (card.next_review_date !== undefined) payload.next_review_date = card.next_review_date;
-
-        await setDoc(docRef, payload);
+      // Chunk into batches of 400 (Firestore maximum is 500 per batch)
+      const chunkSize = 400;
+      for (let i = 0; i < newCards.length; i += chunkSize) {
+        const chunk = newCards.slice(i, i + chunkSize);
+        const batch = writeBatch(db);
+        for (const card of chunk) {
+          const docRef = doc(db, "cards", card.id);
+          const payload: any = {
+            id: card.id,
+            userId: activeUid,
+            term: card.term,
+            definition: card.definition,
+            hint: card.hint || "",
+            confidence: card.confidence || "",
+            searchKeywords: generateSearchKeywords(card.term)
+          };
+          if (card.interval !== undefined) payload.interval = card.interval;
+          if (card.ease_factor !== undefined) payload.ease_factor = card.ease_factor;
+          if (card.next_review_date !== undefined) payload.next_review_date = card.next_review_date;
+          batch.set(docRef, payload);
+        }
+        await batch.commit();
       }
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, "cards-bulk");
@@ -796,6 +1355,8 @@ export default function App() {
           
           if (localCardsList.length > 0 && cloudCards.length === 0) {
             await dbAddMultipleCards(localCardsList, currentUser.uid);
+          } else if (cloudCards.length > 0) {
+            setCards(cloudCards);
           }
           
           // Fetch stats
@@ -809,8 +1370,10 @@ export default function App() {
             setStudiedCount(sData.studiedCount ?? 0);
             setBestMatchTime(sData.bestMatchTime ?? 0);
           } else {
-            // Save local stats to cloud
-            await dbSaveStats(studiedCount, bestMatchTime, currentUser.uid);
+            // Save local stats to cloud using values retrieved from localStorage directly to avoid stale closures
+            const currentStudiedCount = Number(localStorage.getItem("learning_dashboard_studied_count") || "0");
+            const currentBestMatchTime = Number(localStorage.getItem("learning_dashboard_best_match") || "0");
+            await dbSaveStats(currentStudiedCount, currentBestMatchTime, currentUser.uid);
           }
           setSyncingStatus("synced");
         } catch (err: any) {
@@ -823,32 +1386,7 @@ export default function App() {
       }
     });
     return () => unsubscribe();
-  }, [studiedCount, bestMatchTime]);
-
-  // Real-time Firestore sync
-  useEffect(() => {
-    if (!user) return;
-    
-    setSyncingStatus("syncing");
-    const q = query(collection(db, "cards"), where("userId", "==", user.uid));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const cloudCards: Flashcard[] = [];
-      snapshot.forEach((doc) => {
-        cloudCards.push(doc.data() as Flashcard);
-      });
-      
-      if (cloudCards.length > 0) {
-        setCards(cloudCards);
-      }
-      setSyncingStatus("synced");
-    }, (error) => {
-      setSyncingStatus("error");
-      setSyncError(error.message);
-      handleFirestoreError(error, OperationType.GET, "cards");
-    });
-    
-    return () => unsubscribe();
-  }, [user]);
+  }, []);
 
   // Save cards to localStorage automatically
   useEffect(() => {
@@ -856,22 +1394,29 @@ export default function App() {
   }, [cards]);
 
   // Handle study tracking with active review queue
-  const trackStudy = (type: "hard" | "good" | "easy") => {
+  const handleMastered = (mastered: boolean) => {
     const currentCard = cards.find(c => c.id === sessionQueue[0]) || cards[0];
     if (!currentCard) return;
 
-    // Save confidence level on card state
-    updateCardConfidence(currentCard.id, type);
-    
-    // Advance metrics
-    const newStudied = studiedCount + 1;
-    setStudiedCount(newStudied);
-    localStorage.setItem("learning_dashboard_studied_count", newStudied.toString());
+    // Update mastered status
+    const updated = cards.map(c => {
+      if (c.id === currentCard.id) {
+        return {
+          ...c,
+          isMastered: mastered
+        };
+      }
+      return c;
+    });
+    setCards(updated);
     if (user) {
-      dbSaveStats(newStudied, bestMatchTime);
+      const cardToUpdate = updated.find(c => c.id === currentCard.id);
+      if (cardToUpdate) {
+        dbAddCard(cardToUpdate);
+      }
     }
 
-    // Go to next card smoothly after short flip transition reset
+    // Go to next card
     setIsFlipped(false);
     setShowHint(false);
     
@@ -880,12 +1425,12 @@ export default function App() {
         if (prev.length === 0) return prev;
         const currentId = prev[0];
         const remaining = prev.slice(1);
-        if (type === "hard") {
-          // If a card is hard, we put it back at the end of the active queue to review again later!
-          return [...remaining, currentId];
-        } else {
-          // If good or easy, we graduate it from the current active study session
+        if (mastered) {
+          // Mastered -> Remove from queue
           return remaining;
+        } else {
+          // Review Again Soon -> Put back at end of queue
+          return [...remaining, currentId];
         }
       });
     }, 320);
@@ -1474,7 +2019,8 @@ To import Anki cards:
       confidence: "",
       interval: 1,
       ease_factor: 2.5,
-      next_review_date: new Date().toISOString()
+      next_review_date: new Date().toISOString(),
+      isMastered: false
     };
 
     addSingleCard(brandCard);
@@ -1510,39 +2056,58 @@ To import Anki cards:
       // Clean up messy index or Markdown list indicators (*, -, •, integers)
       trimmed = trimmed.replace(/^[\s*•\-–—\d\.\)]+\s*/, "");
 
-      // Split at standard delimiters: arrow (-> or =>), colon (:), hyphen (-, –, —), equals (=), pipe (|), or tab
-      const separatorRegex = /\s*(?:->|=>|:=|:|–|—|-|=|\t|\|)\s*/;
-      const match = trimmed.match(separatorRegex);
+      // 1. Match comma/colon with definition keyword (e.g. "Concrete, Definition: A composite material...")
+      const definitionBreakRegex = /[,;:-]?\s*(?:definition|defn|def|meaning)\s*:\s*/i;
+      const defMatch = trimmed.match(definitionBreakRegex);
 
-      if (match && match.index !== undefined) {
-        const termPart = trimmed.substring(0, match.index).trim();
-        const definitionPart = trimmed.substring(match.index + match[0].length).trim();
+      if (defMatch && defMatch.index !== undefined) {
+        const termPart = trimmed.substring(0, defMatch.index).trim();
+        const definitionPart = trimmed.substring(defMatch.index + defMatch[0].length).trim();
 
         if (termPart && definitionPart) {
           parsedCards.push({
             id: `auto-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
             term: termPart,
             definition: definitionPart,
-            hint: `Extracted from text separator.`
+            hint: "Extracted from separator text"
           });
           addedCount += 1;
         }
       } else {
-        // Fallback for natural definitions: split at words like " is ", " means ", or " defined as "
-        const naturalRegex = /\s+(?:is|means|defined as|refers to)\s+/i;
-        const naturalMatch = trimmed.match(naturalRegex);
-        if (naturalMatch && naturalMatch.index !== undefined) {
-          const termPart = trimmed.substring(0, naturalMatch.index).trim();
-          const definitionPart = trimmed.substring(naturalMatch.index + naturalMatch[0].length).trim();
+        // 2. Split at standard delimiters: arrow (-> or =>), colon (:), hyphen (-, –, —), equals (=), pipe (|), or tab
+        const separatorRegex = /\s*(?:->|=>|:=|:|–|—|-|=|\t|\|)\s*/;
+        const match = trimmed.match(separatorRegex);
+
+        if (match && match.index !== undefined) {
+          const termPart = trimmed.substring(0, match.index).trim();
+          const definitionPart = trimmed.substring(match.index + match[0].length).trim();
 
           if (termPart && definitionPart) {
             parsedCards.push({
               id: `auto-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
               term: termPart,
-              definition: definitionPart.charAt(0).toUpperCase() + definitionPart.slice(1),
-              hint: `Derived from structural marker.`
+              definition: definitionPart,
+              hint: "Extracted from separator text"
             });
             addedCount += 1;
+          }
+        } else {
+          // Fallback for natural definitions: split at words like " is ", " means ", or " defined as "
+          const naturalRegex = /\s+(?:is|means|defined as|refers to)\s+/i;
+          const naturalMatch = trimmed.match(naturalRegex);
+          if (naturalMatch && naturalMatch.index !== undefined) {
+            const termPart = trimmed.substring(0, naturalMatch.index).trim();
+            const definitionPart = trimmed.substring(naturalMatch.index + naturalMatch[0].length).trim();
+
+            if (termPart && definitionPart) {
+              parsedCards.push({
+                id: `auto-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+                term: termPart,
+                definition: definitionPart.charAt(0).toUpperCase() + definitionPart.slice(1),
+                hint: "Extracted from separator text"
+              });
+              addedCount += 1;
+            }
           }
         }
       }
@@ -1654,7 +2219,20 @@ To import Anki cards:
         <div className="px-4 mb-2 lg:mb-6 flex flex-row lg:flex-col justify-between lg:justify-start items-center lg:items-start gap-3">
           <div>
             <h1 className="text-xl font-black tracking-tighter text-indigo-500 dark:text-indigo-400">ARCHITECT LRN</h1>
-            <p className="text-[10px] text-slate-500 font-mono">v4.1.0_SRS_STABLE</p>
+            <div className="flex items-center gap-1.5 mt-0.5">
+              <span className="text-[10px] text-slate-500 font-mono">v4.1.0_SRS_STABLE</span>
+              <button 
+                onClick={() => setActiveTab(activeTab === "debug" ? "flashcards" : "debug")}
+                className={`text-[8.5px] font-mono font-bold uppercase px-1.5 py-0.5 rounded cursor-pointer transition-all border ${
+                  activeTab === "debug"
+                    ? "bg-indigo-600 text-white border-indigo-500 shadow-sm shadow-indigo-900/30"
+                    : "bg-indigo-500/10 text-indigo-500 hover:text-indigo-600 dark:text-indigo-400 dark:hover:text-indigo-300 border-indigo-500/20 hover:border-indigo-500/40"
+                }`}
+                title="Open client-first Database Status Tester"
+              >
+                ⚙️ DB Debug
+              </button>
+            </div>
           </div>
           
           {/* Quick Theme Switcher */}
@@ -1874,19 +2452,19 @@ To import Anki cards:
             <div className="max-w-2xl mx-auto space-y-6">
               
               {/* Progress Panel */}
-              <div className="bg-slate-900/40 p-4 rounded-xl border border-slate-900 flex items-center justify-between flex-wrap gap-3">
-                <span className="text-sm font-semibold text-slate-300 font-sans block">
+              <div className={`${stylesObj.panelBg} p-4 rounded-xl border flex items-center justify-between flex-wrap gap-3`}>
+                <span className={`text-sm font-semibold ${stylesObj.textHeading} font-sans block`}>
                   {sessionQueue.length > 0 ? `Card ${activeCardIndex + 1} of ${cards.length}` : "Deck Review session"}
                 </span>
                 
-                <div className="w-48 bg-slate-800 rounded-full h-2 overflow-hidden shadow-inner">
+                <div className={`w-48 ${isDark ? "bg-slate-800" : "bg-slate-200"} rounded-full h-2 overflow-hidden shadow-inner`}>
                   <div 
-                    className="bg-indigo-500 h-full transition-all duration-300 shadow-[0_0_10px_rgba(99,102,241,0.5)]"
+                    className="bg-indigo-600 dark:bg-indigo-505 h-full transition-all duration-300 shadow-[0_0_10px_rgba(99,102,241,0.5)]"
                     style={{ width: `${cards.length > 0 ? Math.round((Math.max(0, cards.length - sessionQueue.length) / cards.length) * 100) : 0}%` }}
                   />
                 </div>
                 
-                <span className="text-xs font-mono text-indigo-400 bg-indigo-500/10 px-2.5 py-0.5 rounded-full border border-indigo-500/20">
+                <span className={`text-xs font-mono px-2.5 py-0.5 rounded-full ${stylesObj.badgeActive}`}>
                   {cards.length > 0 ? Math.round((Math.max(0, cards.length - sessionQueue.length) / cards.length) * 100) : 0}% Mastered ({sessionQueue.length} remaining)
                 </span>
               </div>
@@ -1950,9 +2528,21 @@ To import Anki cards:
                         </div>
 
                         <div className="text-center my-auto px-4 py-8">
+                        <div className="flex items-center justify-center gap-2">
                           <h2 className={`text-3xl sm:text-4xl font-extrabold ${isDark ? "text-white" : "text-indigo-950"} tracking-tight leading-tight select-none`}>
                             {activeCard?.term}
                           </h2>
+                          <button
+                            onClick={() => {
+                              const utterance = new SpeechSynthesisUtterance(activeCard?.term);
+                              window.speechSynthesis.speak(utterance);
+                            }}
+                            className={`p-2 rounded-full transition-colors ${isDark ? "hover:bg-slate-800 text-slate-400" : "hover:bg-slate-200 text-slate-500"}`}
+                            aria-label="Speak term"
+                          >
+                            <Volume2 className="w-6 h-6" />
+                          </button>
+                        </div>
                         </div>
 
                         <div className="text-xs text-center text-slate-500 flex items-center justify-center gap-1 font-mono select-none">
@@ -1992,7 +2582,7 @@ To import Anki cards:
                         <HelpCircle className="w-4 h-4" />
                         {showHint ? "Hide Context / Study Hint" : "Reveal Context / Study Hint"}
                       </span>
-                      <span className={`text-xs px-2 py-0.5 rounded font-mono ${isDark ? "bg-slate-800/50 border border-slate-700/20 text-indigo-300" : "bg-slate-100 border border-slate-200 text-indigo-755"}`}>
+                      <span className={`text-xs px-2 py-0.5 rounded font-mono ${isDark ? "bg-slate-800/50 border border-slate-700/20 text-indigo-300" : "bg-slate-100 border border-slate-200 text-indigo-700"}`}>
                         {showHint ? "[-]" : "[+]"}
                       </span>
                     </button>
@@ -2005,36 +2595,35 @@ To import Anki cards:
 
                   {/* Anki Confidence Rating Panel */}
                   <div className="bg-slate-900/20 p-5 rounded-2xl border border-slate-900 space-y-4">
-                    <span className="block text-xs font-semibold text-center text-slate-400 uppercase tracking-wider font-mono">
+                    <span className={`block text-xs font-semibold text-center uppercase tracking-wider font-mono ${isDark ? "text-slate-300" : "text-slate-800"}`}>
                       Evaluate active recall accuracy:
                     </span>
                     
-                    <div className="grid grid-cols-3 gap-3">
+                    <div className="grid grid-cols-2 gap-3">
                       <button
-                        onClick={() => trackStudy("hard")}
-                        className="bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 hover:text-rose-100 border-2 border-rose-500/40 hover:border-rose-500/80 py-3.5 rounded-xl text-sm font-semibold transition-all cursor-pointer flex flex-col items-center gap-1 shadow-md hover:shadow-rose-950/20"
+                        onClick={() => handleMastered(true)}
+                        className={`py-3.5 rounded-xl text-sm font-semibold transition-all cursor-pointer flex flex-col items-center gap-1 shadow-md
+                          ${isDark
+                            ? "bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 hover:text-emerald-100 border-2 border-emerald-500/40 hover:border-emerald-500/80 shadow-emerald-950/20"
+                            : "bg-emerald-100 hover:bg-emerald-200 text-emerald-950 hover:text-emerald-900 border-2 border-emerald-400 hover:border-emerald-500"
+                          }
+                        `}
                       >
-                        <XCircle className="w-5 h-5 text-rose-400" />
-                        Hard
-                        <span className="text-[10px] font-mono text-rose-500/80 font-normal">Repeat (End)</span>
+                        <CheckCircle2 className={`w-5 h-5 ${isDark ? "text-emerald-400" : "text-emerald-700"}`} />
+                        Mastered
                       </button>
 
                       <button
-                        onClick={() => trackStudy("good")}
-                        className="bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 hover:text-indigo-100 border-2 border-indigo-500/40 hover:border-indigo-500/80 py-3.5 rounded-xl text-sm font-semibold transition-all cursor-pointer flex flex-col items-center gap-1 shadow-md hover:shadow-indigo-950/20"
+                        onClick={() => handleMastered(false)}
+                        className={`py-3.5 rounded-xl text-sm font-semibold transition-all cursor-pointer flex flex-col items-center gap-1 shadow-md
+                          ${isDark
+                            ? "bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 hover:text-indigo-100 border-2 border-indigo-500/40 hover:border-indigo-500/80 shadow-indigo-950/20"
+                            : "bg-indigo-100 hover:bg-indigo-200 text-indigo-950 hover:text-indigo-900 border-2 border-indigo-400 hover:border-indigo-500"
+                          }
+                        `}
                       >
-                        <RotateCw className="w-5 h-5 text-indigo-400" />
-                        Good
-                        <span className="text-[10px] font-mono text-indigo-500/80 font-normal">Graduate card</span>
-                      </button>
-
-                      <button
-                        onClick={() => trackStudy("easy")}
-                        className="bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 hover:text-emerald-100 border-2 border-emerald-500/40 hover:border-emerald-500/80 py-3.5 rounded-xl text-sm font-semibold transition-all cursor-pointer flex flex-col items-center gap-1 shadow-md hover:shadow-emerald-950/20"
-                      >
-                        <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-                        Easy
-                        <span className="text-[10px] font-mono text-emerald-500/80 font-normal">Graduate card</span>
+                        <RotateCw className={`w-5 h-5 ${isDark ? "text-indigo-400" : "text-indigo-700"}`} />
+                        Review Again Soon
                       </button>
                     </div>
                   </div>
@@ -2436,9 +3025,9 @@ To import Anki cards:
                           onChange={handleImportJSONBackup}
                           className="opacity-0 absolute inset-0 w-full h-full cursor-pointer z-10"
                         />
-                        <div className="bg-slate-100 dark:bg-slate-950 hover:bg-slate-200 dark:hover:bg-slate-900 border-2 border-dashed border-slate-300 dark:border-slate-800 rounded-xl py-2.5 px-4 text-center transition-all flex items-center justify-center gap-2 cursor-pointer">
-                          <Upload className="w-3.5 h-3.5 text-indigo-400" />
-                          <span className={`text-xs font-bold uppercase tracking-wider ${stylesObj.textLight}`}>
+                        <div className={`border-2 ${isDark ? "bg-slate-950/50 border-slate-800" : "bg-white border-slate-400"} rounded-xl py-2.5 px-4 text-center transition-all flex items-center justify-center gap-2 cursor-pointer hover:border-indigo-500`}>
+                          <Upload className={`w-3.5 h-3.5 ${isDark ? "text-indigo-400" : "text-indigo-700"}`} />
+                          <span className={`text-xs font-bold uppercase tracking-wider ${isDark ? stylesObj.textLight : "text-slate-950"}`}>
                             Upload Backup
                           </span>
                         </div>
@@ -2505,6 +3094,10 @@ To import Anki cards:
                                 <Save className="w-3.5 h-3.5" />
                                 <span>Save Here</span>
                               </button>
+                              
+                              {saveStatus && saveStatus.includes(`slot ${slot.num}`) && (
+                                <span className="text-[10px] text-emerald-500 font-bold ml-2">✓ Saved!</span>
+                              )}
 
                               {parsed ? (
                                 <>
@@ -2543,6 +3136,9 @@ To import Anki cards:
                 
                 {/* Column left: Setup manually */}
                 <div className="bg-slate-900/40 rounded-2xl border-2 border-slate-800 p-6 md:p-8 space-y-6">
+                  
+
+
                   <div className="flex items-center gap-3 border-b border-slate-800/80 pb-3">
                     <Plus className="w-5 h-5 text-indigo-400" />
                     <div>
@@ -2676,7 +3272,7 @@ To import Anki cards:
                       <div className="space-y-4 animate-fade-in text-left">
                         <div className="space-y-1.5">
                           <label className="block text-xs uppercase text-slate-400 tracking-wider font-mono font-semibold">Upload Study Deck File:</label>
-                          <div className="border-2 border-dashed border-slate-800 hover:border-indigo-500/40 bg-slate-950/50 rounded-2xl p-6 transition-all flex flex-col items-center justify-center text-center group relative cursor-pointer min-h-[180px]">
+                          <div className={`border-4 ${isDark ? "border-slate-800 hover:border-indigo-500/40 bg-slate-950/50" : "border-slate-400 hover:border-indigo-500 bg-white"} rounded-2xl p-6 transition-all flex flex-col items-center justify-center text-center group relative cursor-pointer min-h-[180px]`}>
                             <input
                               type="file"
                               accept=".csv,.txt,.json,.apkg"
@@ -2735,13 +3331,13 @@ To import Anki cards:
 
 
               {/* Deck lists inventory manager */}
-              <div className="bg-slate-900/20 rounded-2xl border border-slate-900 p-6 space-y-4">
-                <div className="flex justify-between items-center flex-wrap gap-4 border-b border-slate-900 pb-4">
+              <div className={`${stylesObj.panelBg} rounded-2xl border p-6 space-y-4`}>
+                <div className={`flex justify-between items-center flex-wrap gap-4 border-b ${stylesObj.border} pb-4`}>
                   <div>
-                    <h4 className="text-base font-bold text-slate-100 flex items-center gap-1.5">
-                      <FileText className="w-5 h-5 text-indigo-400" /> Deck Inventory Configuration
+                    <h4 className={`text-base font-bold ${stylesObj.textHeading} flex items-center gap-1.5`}>
+                      <FileText className="w-5 h-5 text-indigo-500 dark:text-indigo-400" /> Deck Inventory Configuration
                     </h4>
-                    <p className="text-xs text-slate-400 font-sans">Review, modify, or eliminate generated card listings</p>
+                    <p className={`text-xs ${stylesObj.textMuted} font-sans`}>Review, modify, or eliminate generated card listings</p>
                   </div>
                   <div className="flex items-center gap-2">
                     <button
@@ -2752,23 +3348,30 @@ To import Anki cards:
                       Export Deck PDF
                     </button>
                     <button
-                      onClick={async () => {
-                        if (confirm("Confirm deck clear? Default card listing presets will refresh.")) {
-                          setCards(DEFAULT_CARDS);
-                          setCurrentIdx(0);
-                          if (user) {
-                            try {
-                              const q = query(collection(db, "cards"), where("userId", "==", user.uid));
-                              const snapshot = await getDocs(q);
-                              for (const d of snapshot.docs) {
-                                await deleteDoc(d.ref);
+                      onClick={() => {
+                        triggerConfirm(
+                          "Clear Active Deck",
+                          "Are you sure you want to restore the default flashcards? This will replace any custom cards and order you have configured.",
+                          async () => {
+                            setCards(DEFAULT_CARDS);
+                            setCurrentIdx(0);
+                            showToast("Active deck reset to default presets.", "info");
+                            if (user) {
+                              try {
+                                const q = query(collection(db, "cards"), where("userId", "==", user.uid));
+                                const snapshot = await getDocs(q);
+                                for (const d of snapshot.docs) {
+                                  await deleteDoc(d.ref);
+                                }
+                                await dbAddMultipleCards(DEFAULT_CARDS);
+                              } catch (e) {
+                                console.error("Cloud deck reset failed: ", e);
                               }
-                              await dbAddMultipleCards(DEFAULT_CARDS);
-                            } catch (e) {
-                              console.error("Cloud deck reset failed: ", e);
                             }
-                          }
-                        }
+                          },
+                          "danger",
+                          "Confirm Reset"
+                        );
                       }}
                       className="text-xs text-rose-400 bg-rose-500/5 hover:bg-rose-500/15 border border-rose-500/20 hover:border-rose-500/40 px-3 py-1.5 rounded-xl transition-all font-semibold font-mono cursor-pointer"
                     >
@@ -2827,47 +3430,32 @@ To import Anki cards:
                   }
 
                   return (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
-                      {filteredCards.map((card) => {
-                        const originalIndex = cards.findIndex(c => c.id === card.id);
-                        return (
-                          <div 
-                            key={card.id}
-                            className="bg-slate-950 border border-slate-900/80 p-4 rounded-xl flex justify-between items-start gap-3 hover:border-slate-800 transition-all text-xs"
-                          >
-                            <div className="space-y-1 flex-1">
-                              <div className="flex items-center gap-2">
-                                <span className="font-mono text-[10px] text-indigo-400 uppercase tracking-wider font-semibold">#{originalIndex + 1} Term</span>
-                                {card.confidence && (
-                                  <span className={`px-2 py-0.2 rounded text-[8px] font-mono font-semibold uppercase ${
-                                    card.confidence === "easy" 
-                                      ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" 
-                                      : card.confidence === "hard" 
-                                      ? "bg-rose-500/10 text-rose-400 border border-rose-500/20" 
-                                      : "bg-indigo-500/10 text-indigo-300 border border-indigo-500/20"
-                                  }`}>
-                                    {card.confidence}
-                                  </span>
-                                )}
-                              </div>
-                              <h5 className="font-bold text-white text-sm selection:bg-indigo-500/30">{card.term}</h5>
-                              <p className="text-slate-400 selection:bg-indigo-500/30 leading-snug">{card.definition}</p>
-                              {card.hint && (
-                                <p className="text-[10px] text-slate-500 selection:bg-indigo-500/30 italic">Hint: {card.hint}</p>
-                              )}
-                            </div>
-
-                            <button
-                              onClick={() => handleDeleteCard(card.id)}
-                              className="text-slate-500 hover:text-rose-400 p-1.5 rounded-lg hover:bg-rose-500/10 transition-all cursor-pointer"
-                              title="Delete this study card"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
+                    <DndContext 
+                      sensors={sensors}
+                      collisionDetection={closestCorners}
+                      onDragEnd={handleDragEnd}
+                    >
+                      <SortableContext 
+                        items={filteredCards}
+                        strategy={rectSortingStrategy}
+                      >
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
+                          {filteredCards.map((card) => {
+                            const originalIndex = cards.findIndex(c => c.id === card.id);
+                            return (
+                              <SortableFlashcardItem 
+                                key={card.id} 
+                                card={card} 
+                                originalIndex={originalIndex} 
+                                handleDeleteCard={handleDeleteCard} 
+                                isDark={isDark}
+                                stylesObj={stylesObj}
+                              />
+                            );
+                          })}
+                        </div>
+                      </SortableContext>
+                    </DndContext>
                   );
                 })()}
               </div>
@@ -2875,10 +3463,119 @@ To import Anki cards:
             </div>
           )}
 
+          {/* TAB E: SECURE DATABASE STATUS DIAGNOSTICS & SYSTEM MONITOR */}
+          {activeTab === "debug" && (
+            <DatabaseStatusTester
+              user={user}
+              isDark={isDark}
+              stylesObj={stylesObj}
+              showToast={showToast}
+            />
+          )}
+
+      {/* Iframe-Safe Toast Notifications Overlay */}
+      <div className="fixed bottom-4 right-4 z-50 space-y-2 pointer-events-none">
+        {toasts.map((t) => (
+          <div
+            key={t.id}
+            className={`shadow-lg rounded-xl border p-3 flex items-center justify-between gap-2.5 animate-fade-in pointer-events-auto max-w-sm text-xs font-medium font-sans ${
+              t.type === 'success' 
+                ? 'bg-emerald-950 text-emerald-100 border-emerald-500/20' 
+                : t.type === 'error' 
+                ? 'bg-rose-950 text-rose-100 border-rose-500/20' 
+                : 'bg-slate-900 text-indigo-100 border-indigo-500/10'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <div className={`w-1.5 h-1.5 rounded-full ${t.type === 'success' ? 'bg-emerald-400' : t.type === 'error' ? 'bg-rose-400' : 'bg-indigo-400'}`} />
+              <span className="flex-1 leading-snug">{t.message}</span>
+            </div>
+            <button 
+              onClick={() => setToasts((prev) => prev.filter((prevT) => prevT.id !== t.id))}
+              className="text-[10px] text-slate-400 hover:text-white font-mono cursor-pointer ml-1.5 p-0.5"
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {/* Custom High-Quality Confirm Modal */}
+      <AestheticConfirmModal
+        isOpen={confirmModal.isOpen}
+        title={confirmModal.title}
+        message={confirmModal.message}
+        confirmText={confirmModal.confirmText}
+        type={confirmModal.type}
+        onConfirm={confirmModal.onConfirm}
+        onCancel={() => setConfirmModal(prev => ({ ...prev, isOpen: false }))}
+      />
+
         </div>
 
       </main>
 
+    </div>
+  );
+}
+
+interface AestheticConfirmModalProps {
+  isOpen: boolean;
+  title: string;
+  message: string;
+  confirmText: string;
+  cancelText?: string;
+  type?: 'primary' | 'danger';
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
+function AestheticConfirmModal({
+  isOpen,
+  title,
+  message,
+  confirmText,
+  cancelText = "Cancel",
+  type = "primary",
+  onConfirm,
+  onCancel
+}: AestheticConfirmModalProps) {
+  if (!isOpen) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 animate-fade-in">
+      {/* Background Mask */}
+      <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm" onClick={onCancel} />
+      
+      {/* Centered Card */}
+      <div className="bg-slate-900 border-2 border-slate-800 p-6 rounded-2xl max-w-md w-full relative z-10 shadow-2xl space-y-4 text-left font-sans">
+        <h4 className="text-base font-bold text-slate-100 flex items-center gap-2">
+          {type === 'danger' ? '⚠️' : 'ℹ️'} {title}
+        </h4>
+        <p className="text-xs text-slate-300 leading-relaxed">
+          {message}
+        </p>
+        <div className="flex justify-end gap-2 pt-2">
+          <button
+            onClick={onCancel}
+            className="px-4 py-2 bg-slate-800 hover:bg-slate-750 text-slate-300 rounded-xl text-xs font-semibold cursor-pointer transition-all border border-slate-700/50"
+          >
+            {cancelText}
+          </button>
+          <button
+            onClick={() => {
+              onConfirm();
+              onCancel();
+            }}
+            className={`px-4 py-2 rounded-xl text-xs font-semibold cursor-pointer transition-all text-white ${
+              type === 'danger' 
+                ? 'bg-rose-600 hover:bg-rose-500 shadow-sm shadow-rose-950/30' 
+                : 'bg-indigo-600 hover:bg-indigo-500 shadow-sm shadow-indigo-950/30'
+            }`}
+          >
+            {confirmText}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -35,7 +35,7 @@ service cloud.firestore {
     // 2. Validation Blueprints for Flashcard Entity
     function isValidCard(data) {
       return data.keys().hasAll(['id', 'userId', 'term', 'definition'])
-        && data.keys().size() <= 10
+        && data.keys().size() <= 12
         && data.id is string && data.id.size() <= 128
         && data.userId == request.auth.uid
         && data.term is string && data.term.size() >= 1 && data.term.size() <= 2000
@@ -44,7 +44,8 @@ service cloud.firestore {
         && (!('confidence' in data) || (data.confidence is string && (data.confidence == 'hard' || data.confidence == 'good' || data.confidence == 'easy' || data.confidence == '')))
         && (!('interval' in data) || (data.interval is int || data.interval is float))
         && (!('ease_factor' in data) || (data.ease_factor is int || data.ease_factor is float))
-        && (!('next_review_date' in data) || data.next_review_date is string);
+        && (!('next_review_date' in data) || data.next_review_date is string)
+        && (!('searchKeywords' in data) || data.searchKeywords is list);
     }
 
     // 2. Validation Blueprints for UserStats Entity
