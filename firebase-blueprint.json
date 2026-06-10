@@ -1,0 +1,42 @@
+{
+  "entities": {
+    "Flashcard": {
+      "title": "Flashcard",
+      "description": "An individual study card with an active recall concept and definition.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique card identifier" },
+        "userId": { "type": "string", "description": "The UID of the owning user" },
+        "term": { "type": "string", "description": "The prompt or term side of the card" },
+        "definition": { "type": "string", "description": "The answer or definition side of the card" },
+        "hint": { "type": "string", "description": "Optional secondary study hint" },
+        "confidence": { "type": "string", "enum": ["hard", "good", "easy", ""], "description": "Active recall level of confidence" },
+        "interval": { "type": "integer", "description": "Spaced repetition interval in days" },
+        "ease_factor": { "type": "number", "description": "Spaced repetition difficulty coefficient multiplier" },
+        "next_review_date": { "type": "string", "format": "date-time", "description": "Calendar ISO timestamp of next scheduled study/review time" }
+      },
+      "required": ["id", "userId", "term", "definition"]
+    },
+    "UserStats": {
+      "title": "UserStats",
+      "description": "User overall stats including studied cards count and high scores.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "User identification UID" },
+        "studiedCount": { "type": "integer", "description": "Total number of cards studied overall" },
+        "bestMatchTime": { "type": "number", "description": "Best time in seconds in matching minigame" }
+      },
+      "required": ["userId", "studiedCount", "bestMatchTime"]
+    }
+  },
+  "firestore": {
+    "/cards/{cardId}": {
+      "schema": "Flashcard",
+      "description": "The collection of interactive flashcards owned by studying users"
+    },
+    "/users/{userId}/stats/dashboard": {
+      "schema": "UserStats",
+      "description": "User-level metrics and scores overall"
+    }
+  }
+}

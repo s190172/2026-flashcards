@@ -1,0 +1,6 @@
+{
+  "name": "Flashcard Learning Dashboard",
+  "description": "A high-performance multi-tab learning dashboard featuring a 3D self-spaced flashcard carousel, standard Anki SRS controls, an Exam Center with custom mock exams, a gamified matching matrix, and custom deck generation tools.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

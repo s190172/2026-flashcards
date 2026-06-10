@@ -1,0 +1,99 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+    
+    // Common global helper primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+    
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_-]+$');
+    }
+    
+    function incoming() {
+      return request.resource.data;
+    }
+    
+    // Auth-verified check is used since security is crucial
+    function isVerifiedUser() {
+      return isSignedIn() && (request.auth.token.email_verified == true || request.auth.token.firebase.signInProvider == 'anonymous');
+    }
+    
+    function existing() {
+      return resource.data;
+    }
+    
+    // 2. Validation Blueprints for Flashcard Entity
+    function isValidCard(data) {
+      return data.keys().hasAll(['id', 'userId', 'term', 'definition'])
+        && data.keys().size() <= 10
+        && data.id is string && data.id.size() <= 128
+        && data.userId == request.auth.uid
+        && data.term is string && data.term.size() >= 1 && data.term.size() <= 2000
+        && data.definition is string && data.definition.size() >= 1 && data.definition.size() <= 8000
+        && (!('hint' in data) || (data.hint is string && data.hint.size() <= 2000))
+        && (!('confidence' in data) || (data.confidence is string && (data.confidence == 'hard' || data.confidence == 'good' || data.confidence == 'easy' || data.confidence == '')))
+        && (!('interval' in data) || (data.interval is int || data.interval is float))
+        && (!('ease_factor' in data) || (data.ease_factor is int || data.ease_factor is float))
+        && (!('next_review_date' in data) || data.next_review_date is string);
+    }
+
+    // 2. Validation Blueprints for UserStats Entity
+    function isValidStats(data, userId) {
+      return data.keys().hasAll(['userId', 'studiedCount', 'bestMatchTime'])
+        && data.keys().size() == 3
+        && data.userId == userId
+        && data.studiedCount is int && data.studiedCount >= 0
+        && (data.bestMatchTime is int || data.bestMatchTime is float) && data.bestMatchTime >= 0.0;
+    }
+
+    // 3. Collection Match Rules: Cards
+    match /cards/{cardId} {
+      allow create: if isSignedIn()
+        && isValidId(cardId)
+        && isValidCard(incoming());
+        
+      allow get: if isSignedIn()
+        && isValidId(cardId)
+        && existing().userId == request.auth.uid;
+        
+      allow list: if isSignedIn()
+        && existing().userId == request.auth.uid;
+        
+      allow update: if isSignedIn()
+        && isValidId(cardId)
+        && isValidCard(incoming())
+        && incoming().userId == existing().userId
+        && incoming().id == existing().id;
+        
+      allow delete: if isSignedIn()
+        && isValidId(cardId)
+        && existing().userId == request.auth.uid;
+    }
+    
+    // 3. Collection Match Rules: User stats
+    match /users/{userId}/stats/dashboard {
+      allow get: if isOwner(userId)
+        && isValidId(userId);
+        
+      allow list: if isOwner(userId)
+        && isValidId(userId);
+      
+      allow create, update: if isOwner(userId)
+        && isValidId(userId)
+        && isValidStats(incoming(), userId);
+        
+      allow delete: if isOwner(userId)
+        && isValidId(userId);
+    }
+  }
+}
