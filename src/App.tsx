@@ -34,7 +34,6 @@ import {
   RotateCcw,
   Sliders
 } from "lucide-react";
-import { GoogleGenAI, Type } from "@google/genai";
 import { jsPDF } from "jspdf";
 
 // Firebase imports
@@ -1020,86 +1019,46 @@ To import Anki cards:
       const text = event.target?.result as string;
       if (!text) return;
 
-      // Use live Gemini structural parser if API key is active
-      if (geminiApiKey) {
-        setGeminiStatus({ type: "loading", msg: `Uploading file contents to Gemini for smart structural parsing...` });
-        try {
-          const ai = new GoogleGenAI({ 
-            apiKey: geminiApiKey,
-            httpOptions: {
-              headers: {
-                "User-Agent": "aistudio-build"
-              }
-            }
-          });
+      // Use modern server-side Gemini background ingestion as the primary method
+      setGeminiStatus({ type: "loading", msg: `Uploading file contents to Gemini for smart structural parsing...` });
+      try {
+        const response = await fetch("/api/gemini/ingest", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ text })
+        });
 
-          const response = await ai.models.generateContent({
-            model: "gemini-3.5-flash",
-            contents: `You are an expert tutor and data cleanup service. The user uploaded raw card data, scraped logs, or study text.
-Carefully clean up details:
-1. Strip all messy raw HTML tags (like <b>, <i>, <br>, <a>, divs, span, styling properties). 
-2. Correct any broken csv layout characters or column shifts.
-3. Organize each distinct item into a clean term/definition pair with an optional brief hints reference.
-
-File Data Content:
-"""
-${text}
-"""`,
-            config: {
-              responseMimeType: "application/json",
-              responseSchema: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    term: { type: Type.STRING },
-                    definition: { type: Type.STRING },
-                    hint: { type: Type.STRING }
-                  },
-                  required: ["term", "definition", "hint"]
-                }
-              }
-            }
-          });
-
-          const responseText = response.text ? response.text.trim() : "";
-          const parsedArray = JSON.parse(responseText);
-
-          if (Array.isArray(parsedArray)) {
-            const mappedCards: Flashcard[] = parsedArray.map((c: any, index: number) => ({
-              id: `gemini-file-${Date.now()}-${index}`,
-              term: String(c.term || `Concept ${index + 1}`).trim(),
-              definition: String(c.definition || "Extracted term explanation.").trim(),
-              hint: String(c.hint || "Extracted Context hint.").trim(),
-              confidence: "",
-              interval: 1,
-              ease_factor: 2.5,
-              next_review_date: new Date().toISOString()
-            }));
-
-            addCards(mappedCards);
-            setGeminiStatus({
-              type: "success",
-              msg: `✨ Successfully imported ${mappedCards.length} clean flashcards using Gemini AI structural parsing!`
-            });
-            setParseLogs(`🎉 Gemini parsed and cleaned ${mappedCards.length} flashcards from "${file.name}"!`);
-          } else {
-            throw new Error("Parsed response from Gemini was not a valid array.");
-          }
-        } catch (err: any) {
-          console.error("Gemini file parse failed, falling back to local: ", err);
-          setGeminiStatus({
-            type: "error",
-            msg: `AI Parse Failed: ${err.message || String(err)}. Running local standard fallback parser.`
-          });
-          runLocalFileParser(text, fileExtension, file.name);
+        if (!response.ok) {
+          const errData = await response.json();
+          throw new Error(errData.error || `Server returned status ${response.status}`);
         }
-      } else {
-        // Fallback to local standard parser
+
+        const data = await response.json();
+
+        if (data && Array.isArray(data.cards)) {
+          addCards(data.cards);
+          setGeminiStatus({
+            type: "success",
+            msg: `✨ Successfully imported ${data.cards.length} clean flashcards using Gemini AI structural parsing!`
+          });
+          setParseLogs(`🎉 Gemini parsed and cleaned ${data.cards.length} flashcards from "${file.name}"!`);
+        } else {
+          throw new Error("Parsed response from Gemini was not a valid array.");
+        }
+      } catch (err: any) {
+        console.error("Gemini file parse failed, falling back to local: ", err);
+        setGeminiStatus({
+          type: "error",
+          msg: `AI Parse Failed: ${err.message || String(err)}. Running local standard fallback parser.`
+        });
         runLocalFileParser(text, fileExtension, file.name);
       }
     };
     reader.readAsText(file);
+    // Reset file input
+    e.target.value = "";
   };
 
   // Export Deck to a beautiful, clean PDF Study Sheet
@@ -1598,112 +1557,46 @@ ${text}
     }
   };
 
-  // Live real Gemini API generation using official @google/genai module
+  // Live real Gemini API generation using official server-side endpoints
   const runLiveGeminiGeneration = async () => {
     if (!aiTopic.trim()) {
       setGeminiStatus({ type: "error", msg: "Please enter a study topic (e.g. Mitochondria, Quantum Mechanics)" });
       return;
     }
 
-    if (!geminiApiKey) {
-      // Dynamic fallback mock generator if API key is not specified
-      setGeminiStatus({ type: "loading", msg: "Executing AI parser simulation... (Enter Gemini API Key below to query Live live model!)" });
-      
-      const simulatedTopics: Record<string, Flashcard[]> = {
-        mitochondria: [
-          { id: "g-m1", term: "Mitochondria", definition: "Double-membraned organelle powering respiration and chemical synthesis.", hint: "Commonly coined the powerhouse of cellular structural systems." },
-          { id: "g-m2", term: "Adenosine Triphosphate (ATP)", definition: "The essential biochemical energy currencies used to power living cells.", hint: "Synthesized abundantly within mitochondria inner lining chambers." },
-          { id: "g-m3", term: "Mitochondrial DNA", definition: "Distinct, circular genome structures passed directly down maternal pathways.", hint: "Indicates historical endosymbiotic biological lineages." }
-        ],
-        react: [
-          { id: "g-r1", term: "Virtual DOM", definition: "Lightweight representation of the real DOM synced with reconciliation state engines.", hint: "Saves expensive repaint calls across rendering processes." },
-          { id: "g-r2", term: "Reconciliation", definition: "Diff algorithm React runs to swap changed nodes with absolute surgical speed.", hint: "Operates in O(n) heuristic parameters." },
-          { id: "g-r3", term: "Server Components", definition: "State components fetched and pre-rendered entirely on servers.", hint: "Significantly reduces client-side script bundles." }
-        ]
-      };
-
-      const normalizedQuery = aiTopic.toLowerCase().trim();
-      const matchedSim = Object.keys(simulatedTopics).find(key => normalizedQuery.includes(key)) || "mitochondria";
-      const cardsToInject = simulatedTopics[matchedSim];
-
-      setTimeout(() => {
-        addCards(cardsToInject);
-        setGeminiStatus({
-          type: "success",
-          msg: `✨ AI Generated ${cardsToInject.length} premium cards about "${aiTopic}" using intelligent local offline engines!`
-        });
-        setAiTopic("");
-      }, 1500);
-      return;
-    }
-
-    // Save key to sessionStorage securely
-    sessionStorage.setItem("gemini_app_key", geminiApiKey);
-
-    setGeminiStatus({ type: "loading", msg: `Engaging Gemini 1.5 Flash client to generate flashcards about "${aiTopic}"...` });
+    setGeminiStatus({ type: "loading", msg: `Engaging Gemini background AI on the server to generate flashcards about "${aiTopic}"...` });
 
     try {
-      // Instantiating modern Client-side GoogleGenAI Client using user credentials
-      const ai = new GoogleGenAI({ 
-        apiKey: geminiApiKey,
-        httpOptions: {
-          headers: {
-            "User-Agent": "aistudio-build"
-          }
-        }
+      const response = await fetch("/api/gemini/generate", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ topic: aiTopic })
       });
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: `Create exactly 5 comprehensive educational flashcards studying the topic: "${aiTopic}".
-Each flashcard must contain an explanation term, definition, and brief context hint.`,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                term: { type: Type.STRING },
-                definition: { type: Type.STRING },
-                hint: { type: Type.STRING }
-              },
-              required: ["term", "definition", "hint"]
-            }
-          }
-        }
-      });
+      if (!response.ok) {
+        const errData = await response.json();
+        throw new Error(errData.error || `Server returned status ${response.status}`);
+      }
 
-      const cleanedText = response.text ? response.text.trim() : "";
-      const parsedArray = JSON.parse(cleanedText);
+      const data = await response.json();
 
-      if (Array.isArray(parsedArray)) {
-        const mappedCards: Flashcard[] = parsedArray.map((card_raw: any, index: number) => ({
-          id: `gemini-${Date.now()}-${index}`,
-          term: String(card_raw.term || "Empty Term"),
-          definition: String(card_raw.definition || "Empty Definition"),
-          hint: String(card_raw.hint || "Hint generated by Gemini API."),
-          confidence: "",
-          interval: 1,
-          ease_factor: 2.5,
-          next_review_date: new Date().toISOString()
-        }));
-
-        addCards(mappedCards);
+      if (data && Array.isArray(data.cards)) {
+        addCards(data.cards);
         setGeminiStatus({
           type: "success",
-          msg: `✨ Successfully imported ${mappedCards.length} live Gemini-generated flashcards into your dashboard!`
+          msg: `✨ Successfully imported ${data.cards.length} live Gemini-generated flashcards into your dashboard!`
         });
         setAiTopic("");
       } else {
-        throw new Error("Invalid output layout structures parsed from model.");
+        throw new Error("Invalid output layout structures parsed from server response.");
       }
-
     } catch (err: any) {
-      console.error(err);
+      console.error("Gemini server-side generation failed: ", err);
       setGeminiStatus({
         type: "error",
-        msg: `Gemini API Call Failed: ${err.message || "Ensure key is active and connection is healthy."}`
+        msg: `Gemini Generation Failed: ${err.message || "Ensure the network is healthy and try again."}`
       });
     }
   };
@@ -1715,130 +1608,41 @@ Each flashcard must contain an explanation term, definition, and brief context h
       return;
     }
 
-    if (!geminiApiKey) {
-      setGeminiStatus({ type: "loading", msg: "Simulating AI Note Extraction... (Enter a Gemini API Key to run real-time AI parsing!)" });
-      
-      setTimeout(() => {
-        // Try parsing draft concepts or use beautiful sample cards derived from user raw text
-        const sampleCards: Flashcard[] = [];
-        const splitLines = rawNotes.split("\n").map(l => l.trim()).filter(l => l.length > 8);
-
-        splitLines.slice(0, 4).forEach((line, index) => {
-          // Clean list prefixes
-          const cleanedLine = line.replace(/^[\s*•\-–—\d\.\)]+\s*/, "");
-          const separatorIdx = cleanedLine.search(/[:\-\–\—]/);
-          let term = `Extracted Term ${index + 1}`;
-          let def = cleanedLine;
-          if (separatorIdx !== -1) {
-            term = cleanedLine.substring(0, separatorIdx).trim();
-            def = cleanedLine.substring(separatorIdx + 1).trim();
-          } else {
-            // Pick a reasonable first chunk as term if no separator
-            const words = cleanedLine.split(" ");
-            if (words.length > 2) {
-              term = words.slice(0, 2).join(" ");
-              def = words.slice(2).join(" ");
-            }
-          }
-          sampleCards.push({
-            id: `extracted-notes-mock-${Date.now()}-${index}`,
-            term: term,
-            definition: def,
-            hint: `Synthesized from your study note line #${index + 1}`,
-            confidence: "",
-            interval: 1,
-            ease_factor: 2.5,
-            next_review_date: new Date().toISOString()
-          });
-        });
-
-        if (sampleCards.length === 0) {
-          sampleCards.push(
-            { id: `notes-mock-1`, term: "Passive Reading", definition: "A low-efficiency study method that merely scans text without self-testing.", hint: "Often mistaken for active learning due to familiarity bias.", confidence: "", interval: 1, ease_factor: 2.5, next_review_date: new Date().toISOString() },
-            { id: `notes-mock-2`, term: "Active Recall", definition: "A powerful retrieval practice technique that triggers active memory search.", hint: "Significantly accelerates permanent synapse consolidation.", confidence: "", interval: 1, ease_factor: 2.5, next_review_date: new Date().toISOString() }
-          );
-        }
-
-        addCards(sampleCards);
-        setGeminiStatus({
-          type: "success",
-          msg: `✨ Note Importer: Smart offline parser successfully extracted ${sampleCards.length} study flashcards!`
-        });
-        setRawNotes("");
-      }, 1500);
-      return;
-    }
-
-    sessionStorage.setItem("gemini_app_key", geminiApiKey);
-    setGeminiStatus({ type: "loading", msg: `Analyzing note context... Engaging real-time Gemini AI extraction.` });
+    setGeminiStatus({ type: "loading", msg: "Analyzing note context... Engaging real-time Gemini AI extraction on server." });
 
     try {
-      const ai = new GoogleGenAI({ 
-        apiKey: geminiApiKey,
-        httpOptions: {
-          headers: {
-            "User-Agent": "aistudio-build"
-          }
-        }
+      const response = await fetch("/api/gemini/ingest", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ text: rawNotes })
       });
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: `You are an expert tutor. Carefully read and analyze the user's study notes pasted below.
-Extract all key concepts, terms, and core frameworks, and compile them into high-quality educational flashcards. Ensure you remove any raw HTML tags if they exist.
+      if (!response.ok) {
+        const errData = await response.json();
+        throw new Error(errData.error || `Server returned status ${response.status}`);
+      }
 
-User study notes:
-"""
-${rawNotes}
-"""`,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                term: { type: Type.STRING },
-                definition: { type: Type.STRING },
-                hint: { type: Type.STRING }
-              },
-              required: ["term", "definition", "hint"]
-            }
-          }
-        }
-      });
+      const data = await response.json();
 
-      const cleanedText = response.text ? response.text.trim() : "";
-      const parsedArray = JSON.parse(cleanedText);
-
-      if (Array.isArray(parsedArray)) {
-        const mappedCards: Flashcard[] = parsedArray.map((card_raw: any, index: number) => ({
-          id: `gemini-note-${Date.now()}-${index}`,
-          term: String(card_raw.term || `Concept ${index + 1}`).trim(),
-          definition: String(card_raw.definition || "Extracted term explanation.").trim(),
-          hint: String(card_raw.hint || "Hint generated from your study note content.").trim(),
-          confidence: "",
-          interval: 1,
-          ease_factor: 2.5,
-          next_review_date: new Date().toISOString()
-        }));
-
-        addCards(mappedCards);
+      if (data && Array.isArray(data.cards)) {
+        addCards(data.cards);
         setGeminiStatus({
           type: "success",
-          msg: `✨ AI Note Extractor parsed successfully! Added ${mappedCards.length} flashcards to your deck.`
+          msg: `✨ Note Importer: Smart server-side Gemini AI successfully extracted ${data.cards.length} study flashcards!`
         });
         setRawNotes("");
       } else {
-        throw new Error("Invalid output layout structures parsed from model.");
+        throw new Error("Invalid output layout structures parsed from server response.");
       }
-
     } catch (err: any) {
-      console.error(err);
+      console.error("Gemini note extraction failed: ", err);
       setGeminiStatus({
         type: "error",
-        msg: `Gemini Extraction Failed: ${err.message || "Please check your network and API key."}`
+        msg: `AI Extract Failed: ${err.message || String(err)}. Running local fallback regex parser.`
       });
+      runLocalRegexParser();
     }
   };
 
