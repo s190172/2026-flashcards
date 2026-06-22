@@ -34,7 +34,9 @@ import {
   RotateCcw,
   Sliders,
   Volume2,
-  GripVertical
+  GripVertical,
+  CloudLightning,
+  ExternalLink
 } from "lucide-react";
 import { 
   DndContext, 
@@ -56,10 +58,24 @@ import { CSS } from '@dnd-kit/utilities';
 import { jsPDF } from "jspdf";
 
 // Firebase imports
-import { auth, db } from "./firebase";
-import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut } from "firebase/auth";
-import { collection, doc, setDoc, deleteDoc, getDocs, onSnapshot, query, where, getDoc, writeBatch } from "firebase/firestore";
-import firebaseConfig from "../firebase-applet-config.json";
+import { auth, db } from "./config/firebaseConfig";
+import { flushSessionBufferToCloud, initializeLifecycleGuard } from "./services/srsSyncEngine";
+import { useDebouncedSave } from "./features/study-tracking/useDebouncedSave";
+import { 
+  onAuthStateChanged, 
+  signInWithPopup, 
+  GoogleAuthProvider, 
+  signOut, 
+  signInAnonymously,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  linkWithPopup,
+  linkWithRedirect,
+  signInWithRedirect,
+  getRedirectResult,
+  signInWithCredential
+} from "firebase/auth";
+import { collection, doc, setDoc, deleteDoc, getDocs, onSnapshot, query, where, getDoc, writeBatch, updateDoc } from "firebase/firestore";
 
 enum OperationType {
   CREATE = 'create',
@@ -189,414 +205,11 @@ const DEFAULT_CARDS: Flashcard[] = [
 ];
 
 
-// Sortable card item for the main Deck Inventory Configuration grid
-function SortableFlashcardItem({ 
-  card, 
-  originalIndex, 
-  handleDeleteCard, 
-  isDark, 
-  stylesObj 
-}: { 
-  card: Flashcard; 
-  originalIndex: number; 
-  handleDeleteCard: (id: string) => void; 
-  isDark: boolean; 
-  stylesObj: any;
-  key?: string | number;
-}) {
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({ id: card.id });
-
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition: isDragging ? 'none' : transition,
-    zIndex: isDragging ? 50 : undefined,
-    opacity: isDragging ? 0.6 : 1,
-  };
-
-  const confidenceColorStyle = card.confidence === "easy" 
-    ? (isDark ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" : "bg-emerald-100 text-emerald-950 border border-emerald-400")
-    : card.confidence === "hard" 
-    ? (isDark ? "bg-rose-500/10 text-rose-400 border border-rose-500/20" : "bg-rose-100 text-rose-950 border border-rose-400")
-    : (isDark ? "bg-indigo-500/10 text-indigo-300 border border-indigo-500/20" : "bg-indigo-100 text-indigo-950 border border-indigo-400");
-
-  const cardBgStyle = isDragging 
-    ? (isDark ? "bg-slate-900 border-indigo-500 shadow-2xl relative cursor-grabbing" : "bg-white border-indigo-600 shadow-2xl relative cursor-grabbing")
-    : (isDark ? "bg-slate-950 border-slate-900/80 hover:border-slate-800 hover:shadow-md cursor-grab animate-fade-in" : "bg-white border-slate-200/90 hover:border-indigo-400 hover:shadow-md cursor-grab animate-fade-in");
-
-  return (
-    <div 
-      ref={setNodeRef}
-      style={style}
-      className={`p-4 rounded-xl flex justify-between items-start gap-3 ${isDragging ? '' : 'transition-all'} text-xs border select-none ${cardBgStyle}`}
-      {...attributes}
-      {...listeners}
-    >
-      <div className="flex gap-2 items-start flex-1 min-w-0">
-        {/* Visual Grab Handle Indicator */}
-        <div 
-          className="text-slate-500 hover:text-indigo-400 p-1 rounded mt-0.5 shrink-0 transition-colors"
-          title="Drag and drop card to reorder"
-        >
-          <GripVertical className="w-4 h-4" />
-        </div>
-
-        <div className="space-y-1 flex-1 min-w-0 text-left">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className={`font-mono text-[10px] uppercase tracking-wider font-semibold ${isDark ? "text-indigo-400" : "text-indigo-700"}`}>
-              #{originalIndex + 1} Term
-            </span>
-            {card.confidence && (
-              <span className={`px-2 py-0.2 rounded text-[8px] font-mono font-semibold uppercase ${confidenceColorStyle}`}>
-                {card.confidence}
-              </span>
-            )}
-          </div>
-          <h5 className={`font-bold text-sm selection:bg-indigo-500/30 break-words ${isDark ? "text-white" : "text-slate-950"}`}>
-            {card.term}
-          </h5>
-          <p className={`${isDark ? "text-slate-400" : "text-slate-800"} selection:bg-indigo-500/30 leading-snug break-words`}>
-            {card.definition}
-          </p>
-          {card.hint && (
-            <p className="text-[10px] text-slate-500 selection:bg-indigo-500/30 italic break-words">
-              Hint: {card.hint}
-            </p>
-          )}
-        </div>
-      </div>
-
-      <button
-        onClick={(e) => {
-          e.stopPropagation();
-          handleDeleteCard(card.id);
-        }}
-        onPointerDown={(e) => {
-          e.stopPropagation();
-        }}
-        className="text-slate-550 hover:text-rose-550 dark:text-slate-500 dark:hover:text-rose-400 p-1.5 rounded-lg hover:bg-rose-500/10 transition-all cursor-pointer shrink-0 mt-0.5 relative z-20"
-        title="Delete this study card"
-      >
-        <Trash2 className="w-4 h-4" />
-      </button>
-    </div>
-  );
-}
-
-// ==========================================
-// CLIENT-FIRST DATABASE STATUS TESTER DIAGNOSTIC COMPONENT
-// ==========================================
-function DatabaseStatusTester({ 
-  user, 
-  isDark, 
-  stylesObj,
-  showToast
-}: { 
-  user: any; 
-  isDark: boolean; 
-  stylesObj: any;
-  showToast: (msg: string, type: "success" | "error" | "info") => void;
-}) {
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [dbCards, setDbCards] = useState<any[]>([]);
-  const [rawGlobalResult, setRawGlobalResult] = useState<{ success: boolean; count: number; error?: string } | null>(null);
-
-  // Fetch current user's cards from original database
-  const fetchUserCards = async () => {
-    if (!user) {
-      setError("No user authenticated. Authenticated session is required by secure security rules.");
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      const q = query(collection(db, "cards"), where("userId", "==", user.uid));
-      const snapshot = await getDocs(q);
-      const items = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setDbCards(items);
-      showToast("Cloud user cards retrieved successfully!", "success");
-    } catch (err: any) {
-      console.error(err);
-      setError(err?.message || "Failed to retrieve cards");
-      showToast("Failed to retrieve cards: Missing or Insufficient Permissions.", "error");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Test Raw Global Collection (gets blocked by custom rules if not owner, demonstrating security!)
-  const testRawGlobalFetch = async () => {
-    setLoading(true);
-    setRawGlobalResult(null);
-    try {
-      const snapshot = await getDocs(collection(db, "cards"));
-      setRawGlobalResult({
-        success: true,
-        count: snapshot.size
-      });
-      showToast("Raw global fetch succeeded (Warning: check rules privacy, should be blocked!)", "info");
-    } catch (err: any) {
-      console.error(err);
-      setRawGlobalResult({
-        success: false,
-        count: 0,
-        error: err?.message || "Permission Denied"
-      });
-      showToast("Security Active: Raw global get rejected as expected.", "success");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Create a synthetic debug test card
-  const handleCreateTestCard = async () => {
-    if (!user) {
-      showToast("Must be signed in to verify database write authorization.", "error");
-      return;
-    }
-    setLoading(true);
-    try {
-      const id = "test_" + Date.now();
-      const testCard = {
-        id,
-        userId: user.uid,
-        term: "💡 Db Status Test Term",
-        definition: "This is a successful client-side Firestore synchronization test card generated at " + new Date().toLocaleTimeString(),
-        confidence: "",
-        interval: 0,
-        ease_factor: 2.5,
-        next_review_date: new Date().toISOString()
-      };
-      await setDoc(doc(db, "cards", id), testCard);
-      showToast("Test card stored successfully in cloud!", "success");
-      // refresh user list
-      await fetchUserCards();
-    } catch (err: any) {
-      showToast("Failed to store test card in cloud: " + (err.message || err), "error");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Delete test card
-  const handleDeleteTestCard = async (id: string) => {
-    setLoading(true);
-    try {
-      await deleteDoc(doc(db, "cards", id));
-      showToast("Test card eliminated from database.", "success");
-      await fetchUserCards();
-    } catch (err: any) {
-      showToast("Failed to delete test card: " + (err.message || err), "error");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    if (user) {
-      fetchUserCards();
-    }
-  }, [user]);
-
-  return (
-    <div className="space-y-6">
-      {/* Header Info */}
-      <div className={`${stylesObj.panelBg} rounded-xl border p-6 space-y-4`}>
-        <div className="flex justify-between items-start flex-wrap gap-4">
-          <div>
-            <h3 className={`text-base font-bold ${stylesObj.textHeading} flex items-center gap-2`}>
-              🔧 Client-First Database Status Tester & Admin Panel
-            </h3>
-            <p className={`text-xs ${stylesObj.textMuted} font-sans`}>
-              Bypass Google Cloud Console dashboard bugs by verifying connection states, inspecting collections, and monitoring synchronization layers.
-            </p>
-          </div>
-          <span className={`px-2.5 py-1 rounded-full text-xs font-mono font-bold uppercase flex items-center gap-1 bg-indigo-500/10 text-indigo-500`}>
-            🧪 Admin Mode
-          </span>
-        </div>
-
-        {/* Configurations Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          <div className={`${isDark ? "bg-slate-950/60" : "bg-slate-100"} p-4 rounded-xl border ${stylesObj.border} space-y-1.5`}>
-            <p className={`text-[10px] font-mono uppercase font-bold tracking-wider ${stylesObj.textMuted}`}>Active Firebase Credentials</p>
-            <div className="text-xs space-y-1 font-mono">
-              <div className="flex justify-between">
-                <span className={`${stylesObj.textMuted}`}>Project ID:</span>
-                <span className={`font-semibold ${stylesObj.textLight}`}>{firebaseConfig.projectId}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className={`${stylesObj.textMuted}`}>Database ID:</span>
-                <span className={`font-semibold text-indigo-500 truncate max-w-[150px]`} title="(default) - Standard Main Database">
-                  (default)
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className={`${stylesObj.textMuted}`}>Auth Domain:</span>
-                <span className={`font-semibold ${stylesObj.textLight} truncate max-w-[150px]`}>{firebaseConfig.authDomain}</span>
-              </div>
-            </div>
-          </div>
-
-          <div className={`${isDark ? "bg-slate-950/60" : "bg-slate-100"} p-4 rounded-xl border ${stylesObj.border} space-y-1.5`}>
-            <p className={`text-[10px] font-mono uppercase font-bold tracking-wider ${stylesObj.textMuted}`}>Authentication & Authority</p>
-            <div className="text-xs space-y-1 font-mono">
-              <div className="flex justify-between">
-                <span className={`${stylesObj.textMuted}`}>Auth State:</span>
-                <span className={`font-semibold ${user ? "text-emerald-500" : "text-amber-500"}`}>{user ? "SIGNED IN" : "SIGNED OUT"}</span>
-              </div>
-              {user && (
-                <>
-                  <div className="flex justify-between">
-                    <span className={`${stylesObj.textMuted}`}>Unique UID:</span>
-                    <span className={`font-semibold ${stylesObj.textLight} truncate max-w-[150px]`} title={user.uid}>{user.uid}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className={`${stylesObj.textMuted}`}>Account E-mail:</span>
-                    <span className={`font-semibold ${stylesObj.textLight} truncate max-w-[150px]`}>{user.email}</span>
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-
-          <div className={`${isDark ? "bg-slate-950/60" : "bg-slate-100"} p-4 rounded-xl border ${stylesObj.border} space-y-1.5`}>
-            <p className={`text-[10px] font-mono uppercase font-bold tracking-wider ${stylesObj.textMuted}`}>Query Diagnostics</p>
-            <div className="text-xs space-y-1">
-              <div className="flex justify-between">
-                <span className={`font-mono text-[11px] ${stylesObj.textMuted}`}>Cards loaded locally:</span>
-                <span className={`font-mono font-bold ${stylesObj.textLight}`}>{dbCards.length} docs</span>
-              </div>
-              <div className="flex gap-2 mt-2">
-                <button
-                  onClick={fetchUserCards}
-                  disabled={loading}
-                  className="flex-1 py-1 px-2 text-[10px] font-bold uppercase bg-indigo-600 text-white rounded hover:bg-indigo-500 cursor-pointer disabled:opacity-50"
-                >
-                  Reload User
-                </button>
-                <button
-                  onClick={testRawGlobalFetch}
-                  disabled={loading}
-                  className="flex-1 py-1 px-2 text-[10px] font-bold uppercase border border-slate-700 hover:bg-slate-800 text-slate-300 rounded cursor-pointer disabled:opacity-50"
-                  title="Grabs raw collection to confirm secure rule rejection for unauthorized fields"
-                >
-                  Global Probe
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {rawGlobalResult && (
-        <div className={`p-4 rounded-xl border ${rawGlobalResult.success ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300" : "bg-rose-500/10 border-rose-500/30 text-rose-300"} font-mono text-xs animate-fade-in`}>
-          <div className="flex justify-between items-center mb-1">
-            <span className="font-bold">🚨 Global DB Probe Diagnosis:</span>
-            <button onClick={() => setRawGlobalResult(null)} className="text-slate-400 hover:text-white">✕</button>
-          </div>
-          {rawGlobalResult.success ? (
-            <p>SUCCESSFUL PROBE. Found {rawGlobalResult.count} total documents in the database. Warning: This indicates security rules do not restrict list operations to owner-specific partitions!</p>
-          ) : (
-            <div className="space-y-1">
-              <p className="text-rose-400 font-bold">REJECTED SECURELY (Expected Rule Action):</p>
-              <p className="text-[11px] break-words text-slate-300 bg-slate-950 p-2 rounded">
-                {rawGlobalResult.error}
-              </p>
-              <p className="text-[10px] text-slate-450 font-sans mt-1">Excellent! The Firestore list security rules successfully blocked an unpartitioned client query. This verifies that your data partitions are protected against leak attacks!</p>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Main Database Table & List */}
-      <div className={`${stylesObj.panelBg} rounded-xl border p-6 space-y-4`}>
-        <div className="flex justify-between items-center flex-wrap gap-4">
-          <div>
-            <h4 className={`text-sm font-bold ${stylesObj.textHeading} flex items-center gap-1.5`}>
-              📂 Document Records: <code className="text-indigo-400 font-mono font-bold">cards</code> collection ({dbCards.length} cards total)
-            </h4>
-            <p className={`text-xs ${stylesObj.textMuted} font-sans`}>
-              Showing raw records registered for the current synchronized UID partition.
-            </p>
-          </div>
-          <button
-            onClick={handleCreateTestCard}
-            disabled={loading}
-            className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 transition-all shadow-md active:scale-95 cursor-pointer"
-          >
-            ➕ Post Debug Card
-          </button>
-        </div>
-
-        {error && (
-          <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-xs text-rose-400 font-mono whitespace-pre-wrap">
-            {error}
-          </div>
-        )}
-
-        {loading && dbCards.length === 0 ? (
-          <div className="p-12 text-center text-xs text-slate-400 font-mono space-y-2">
-            <div className="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto" />
-            <p>Executing fetch from cloud firestore endpoint (Region configured)...</p>
-          </div>
-        ) : dbCards.length === 0 ? (
-          <div className={`p-12 text-center rounded-xl border ${stylesObj.border} border-dashed`}>
-            <p className={`text-xs ${stylesObj.textMuted}`}>No cloud card references. Connect with Google or persist some cards, or press "Post Debug Card" to test write actions!</p>
-          </div>
-        ) : (
-          <div className="overflow-x-auto rounded-xl border border-slate-800/60">
-            <table className="w-full text-left text-xs font-mono">
-              <thead className={`${isDark ? "bg-slate-950" : "bg-slate-100"} text-slate-400 text-[10px] uppercase font-bold border-b border-slate-850`}>
-                <tr>
-                  <th className="p-3">Doc ID</th>
-                  <th className="p-3">User ID (Owner)</th>
-                  <th className="p-3">Term</th>
-                  <th className="p-3">Definition Summary</th>
-                  <th className="p-3 text-right">Operations</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/40">
-                {dbCards.map((card) => (
-                  <tr key={card.id} className={`${isDark ? "hover:bg-slate-900/40" : "hover:bg-slate-100/50"} transition-colors`}>
-                    <td className="p-3 max-w-[120px] truncate font-semibold text-slate-400" title={card.id}>
-                      {card.id}
-                    </td>
-                    <td className="p-3 max-w-[100px] truncate text-slate-500 text-[10px]" title={card.userId}>
-                      {card.userId}
-                    </td>
-                    <td className={`p-3 max-w-[140px] truncate font-bold ${stylesObj.textHeading}`}>
-                      {card.term}
-                    </td>
-                    <td className="p-3 max-w-[200px] truncate text-slate-400">
-                      {card.definition}
-                    </td>
-                    <td className="p-3 text-right">
-                      <button
-                        onClick={() => handleDeleteTestCard(card.id)}
-                        className="py-1 px-2.5 rounded bg-rose-500/10 text-rose-455 border border-rose-500/20 hover:bg-rose-500/20 hover:text-rose-400 text-[10px] cursor-pointer"
-                      >
-                        Delete
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
+import { SortableFlashcardItem } from "./features/deck-inventory/SortableFlashcardItem";
+import { FlashcardStudyView } from "./components/FlashcardStudyView";
+import { DatabaseStatusTester } from "./components/DatabaseStatusTester";
+import { SearchBarView } from "./features/shared-search/SearchBarView";
+import { dbEngine } from "./services/dbProvider";
 export default function App() {
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -660,13 +273,13 @@ export default function App() {
 
   // Iframe-safe Custom Toast notifications state
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; type: 'success' | 'info' | 'error' }>>([]);
-  const showToast = (message: string, type: 'success' | 'info' | 'error' = 'success') => {
+  const showToast = React.useCallback((message: string, type: 'success' | 'info' | 'error' = 'success') => {
     const id = Date.now().toString() + Math.random().toString();
     setToasts((prev) => [...prev, { id, message, type }]);
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
     }, 3500);
-  };
+  }, []);
 
   // Iframe-safe custom confirm modal state
   const [confirmModal, setConfirmModal] = useState<{
@@ -792,7 +405,7 @@ export default function App() {
     if (user) {
       try {
         setSyncingStatus("syncing");
-        const q = query(collection(db, "cards"), where("userId", "==", user.uid));
+        const q = query(collection(db, "cards"), where("authorId", "==", user.uid));
         const snapshot = await getDocs(q);
         
         // Chunk deletions into batches of 400 (Firestore maximum is 500 per batch)
@@ -896,14 +509,14 @@ export default function App() {
   };
 
   // Navigation
-  const [activeTab, setActiveTab] = useState<"flashcards" | "exam" | "match" | "setup" | "debug">("flashcards");
+  const [activeTab, setActiveTab] = useState<"flashcards" | "exam" | "match" | "setup" | "debug" | "search">("flashcards");
 
   // Core Cards State
   const [cards, setCards] = useState<Flashcard[]>(() => {
-    const stored = localStorage.getItem("learning_dashboard_cards");
+    const stored = localStorage.getItem("ARCHITECT_LRN_STATE");
     if (stored) {
       try {
-        return JSON.parse(stored);
+        return JSON.parse(stored).cards || DEFAULT_CARDS;
       } catch (e) {
         return DEFAULT_CARDS;
       }
@@ -911,54 +524,14 @@ export default function App() {
     return DEFAULT_CARDS;
   });
 
-  // Active study session card IDs queue
-  const [sessionQueue, setSessionQueue] = useState<string[]>(() => {
-    const stored = localStorage.getItem("learning_dashboard_cards");
-    let initialCards = DEFAULT_CARDS;
-    if (stored) {
-      try {
-        initialCards = JSON.parse(stored);
-      } catch (e) {
-        initialCards = DEFAULT_CARDS;
-      }
-    }
-    return initialCards.map(c => c.id);
-  });
-
-  // Track previous card IDs to separate deck structural changes from study confidence changes
-  const prevCardIdsRef = useRef<string[]>(cards.map(c => c.id));
-
-  // Synchronize the session queue with deck mutations (keeps deletes & additions updated in Real-time)
-  useEffect(() => {
-    const currentIds = cards.map(c => c.id);
-    const prevIds = prevCardIdsRef.current;
-    
-    // Check if the set of IDs actually changed (addition, deletion, or reset)
-    const isDifferent = 
-      currentIds.length !== prevIds.length || 
-      currentIds.some((id, index) => id !== prevIds[index]);
-
-    if (isDifferent) {
-      setSessionQueue(prev => {
-        // Find newly added card IDs
-        const addedIds = currentIds.filter(id => !prevIds.includes(id));
-        // Filter out deleted cards
-        const remainingPrev = prev.filter(id => currentIds.includes(id));
-        // Return newly added cards plus what's remaining in active study session
-        return [...addedIds, ...remainingPrev];
-      });
-      prevCardIdsRef.current = currentIds;
-    }
-  }, [cards]);
-
-  // Derived state for the active study card
-  const activeCardId = sessionQueue[0];
-  const activeCard = cards.find(c => c.id === activeCardId);
-  const activeCardIndex = activeCard ? cards.findIndex(c => c.id === activeCard.id) : 0;
 
   // Study statistics
   const [studiedCount, setStudiedCount] = useState<number>(() => {
-    return Number(localStorage.getItem("learning_dashboard_studied_count") || "0");
+    const stored = localStorage.getItem("ARCHITECT_LRN_STATE");
+    if (stored) {
+        try { return JSON.parse(stored).stats.studiedCount || 0; } catch (e) { return 0; }
+    }
+    return 0;
   });
 
   // Carousel controls
@@ -970,6 +543,8 @@ export default function App() {
   const [newTerm, setNewTerm] = useState("");
   const [newDefinition, setNewDefinition] = useState("");
   const [newHint, setNewHint] = useState("");
+  const [deckTitle, setDeckTitle] = useState("");
+  const [activeDeckId, setActiveDeckId] = useState<string>("active_default_deck");
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
 
   const [deckSearchQuery, setDeckSearchQuery] = useState("");
@@ -1105,19 +680,66 @@ export default function App() {
   const [matchedCardIds, setMatchedCardIds] = useState<Set<string>>(new Set());
   const [mismatchedTileIds, setMismatchedTileIds] = useState<Set<string>>(new Set());
   const [bestMatchTime, setBestMatchTime] = useState<number>(() => {
-    return Number(localStorage.getItem("learning_dashboard_best_match") || "0");
+    const stored = localStorage.getItem("ARCHITECT_LRN_STATE");
+    if (stored) {
+        try { return JSON.parse(stored).stats.bestMatchTime || 0; } catch (e) { return 0; }
+    }
+    return 0;
   });
   
   // Stopwatch parameters
   const [matchElapsedTime, setMatchElapsedTime] = useState(0);
   const [matchRunning, setMatchRunning] = useState(false);
   const stopwatchRef = useRef<NodeJS.Timeout | null>(null);
+  const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Firebase Auth and real-time database synchronizer states
   const [user, setUser] = useState<any>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [syncingStatus, setSyncingStatus] = useState<"offline" | "syncing" | "synced" | "error">("offline");
   const [syncError, setSyncError] = useState<string | null>(null);
+
+  // Auto-sync cards and user stats
+  useEffect(() => {
+    if (!user) return;
+    
+    // Clear existing
+    if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+    
+    setSyncingStatus("syncing");
+    
+    saveTimeoutRef.current = setTimeout(async () => {
+       try {
+         // Batch sync ALL cards
+         await dbAddMultipleCards(cards, user.uid);
+         
+         // Update user daily study session stats
+         await setDoc(doc(db, "users", user.uid), { 
+             lastActive: new Date().toISOString(),
+             cardCount: cards.length
+         }, { merge: true });
+         
+         setSyncingStatus("synced");
+       } catch (e) {
+         console.error("Auto-save failed", e);
+         setSyncingStatus("error");
+       }
+    }, 5000);
+    
+    return () => { if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current); };
+  }, [cards, user]);
+
+  // NATIVE VISIBILITY LIFECYCLE BINDING
+  useEffect(() => {
+    initializeLifecycleGuard();
+  }, []);
+
+  // Email login / register states
+  const [showEmailForm, setShowEmailForm] = useState(false);
+  const [emailFormMode, setEmailFormMode] = useState<"login" | "signup">("login");
+  const [emailInput, setEmailInput] = useState("");
+  const [passwordInput, setPasswordInput] = useState("");
+  const isFetchingRef = useRef(false);
 
   // Helper: Secure individual card saver
   const dbAddCard = async (card: Flashcard, currentUid?: string) => {
@@ -1128,6 +750,7 @@ export default function App() {
       const payload: any = {
         id: card.id,
         userId: activeUid,
+        authorId: activeUid,
         term: card.term,
         definition: card.definition,
         hint: card.hint || "",
@@ -1170,6 +793,7 @@ export default function App() {
           const payload: any = {
             id: card.id,
             userId: activeUid,
+            authorId: activeUid,
             term: card.term,
             definition: card.definition,
             hint: card.hint || "",
@@ -1205,14 +829,65 @@ export default function App() {
   };
 
   // Google sign in popup
-  const handleGoogleSignIn = async () => {
+  const handleGoogleSignIn = async (forceDirect = false) => {
     const provider = new GoogleAuthProvider();
     setSyncingStatus("syncing");
+    setSyncError(null);
     try {
-      await signInWithPopup(auth, provider);
+      // Trigger the auth popups directly and synchronously inside this user-initiated microtask
+      if (user && user.isAnonymous && !forceDirect) {
+        try {
+          await linkWithPopup(user, provider);
+          showToast("Successfully linked your guest session to Google!", "success");
+        } catch (linkErr: any) {
+          if (linkErr.code === "auth/credential-already-in-use" || linkErr.code === "auth/email-already-in-use" || String(linkErr).includes("already")) {
+            showToast("Google account already has a saved deck. Logging in directly...", "info");
+            // Retrieve the credentials from the first popup to bypass opening a second popup
+            const credential = GoogleAuthProvider.credentialFromError(linkErr) || linkErr.credential;
+            if (credential) {
+              await signInWithCredential(auth, credential);
+              showToast("Logged in with Google!", "success");
+            } else {
+              await signInWithPopup(auth, provider);
+              showToast("Logged in with Google!", "success");
+            }
+          } else {
+            throw linkErr;
+          }
+        }
+      } else {
+        await signInWithPopup(auth, provider);
+        showToast("Logged in with Google!", "success");
+      }
       setSyncingStatus("synced");
     } catch (err: any) {
       console.error("Sign in failed: ", err);
+      const isPopupBlocked = err.code === "auth/popup-blocked" || 
+                             String(err).includes("popup-blocked") || 
+                             String(err).includes("blocked");
+      if (isPopupBlocked) {
+        console.warn("Google popup blocked by browser settings.");
+        setSyncingStatus("error");
+        setSyncError("Popup Blocked: Go to your browser search/address bar, click the blocked popup icon, and select 'Always allow popups'. Or, link instantly using Email & Password below!");
+        showToast("Popup blocked! Please allow popups in your browser bar.", "error");
+        return;
+      }
+      setSyncingStatus("error");
+      setSyncError(err.message || String(err));
+      showToast(err.message || String(err), "error");
+    }
+  };
+
+  // Minimalist One-click guest fallback
+  const handleAnonymousSignIn = async () => {
+    setSyncingStatus("syncing");
+    setSyncError(null);
+    try {
+      await signInAnonymously(auth);
+      setSyncingStatus("synced");
+      showToast("Signed in as Guest. Sync is dynamic and live!", "success");
+    } catch (err: any) {
+      console.error("Guest login failed: ", err);
       setSyncingStatus("error");
       setSyncError(err.message || String(err));
     }
@@ -1234,31 +909,145 @@ export default function App() {
     }
   };
 
-  // Unified wrappers for state mutations
-  const addCards = (newCards: Flashcard[]) => {
-    setCards(prev => [...newCards, ...prev]);
-    if (user) {
-      dbAddMultipleCards(newCards);
+  // Email and Password Sign In or Create Account
+  const handleEmailAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!emailInput.trim() || !passwordInput.trim()) {
+      showToast("Email and password are required.", "error");
+      return;
     }
+    setSyncingStatus("syncing");
+    setSyncError(null);
+    try {
+      if (emailFormMode === "login") {
+        await signInWithEmailAndPassword(auth, emailInput.trim(), passwordInput);
+        showToast("Logged in successfully!", "success");
+      } else {
+        const { authService } = await import("./services/authService");
+        if (user && user.isAnonymous) {
+          try {
+            await authService.upgradeGuestToEmailPassword(emailInput.trim(), passwordInput);
+            showToast("Account created and securely linked to current session!", "success");
+          } catch (linkErr: any) {
+            if (linkErr.code === "auth/email-already-in-use" || linkErr.code === "auth/credential-already-in-use" || String(linkErr).includes("already")) {
+              showToast("Email already exists. Logging in with existing credentials...", "info");
+              await signInWithEmailAndPassword(auth, emailInput.trim(), passwordInput);
+              showToast("Logged in successfully!", "success");
+            } else {
+              throw linkErr;
+            }
+          }
+        } else {
+          await createUserWithEmailAndPassword(auth, emailInput.trim(), passwordInput);
+          showToast("Account created successfully!", "success");
+        }
+      }
+      setEmailInput("");
+      setPasswordInput("");
+      setShowEmailForm(false);
+      setSyncingStatus("synced");
+    } catch (err: any) {
+      console.error("Email authentication failed: ", err);
+      setSyncingStatus("error");
+      setSyncError(err.message || String(err));
+      showToast(err.message || String(err), "error");
+    }
+  };
+
+  // Push Finalized Deck to Cloud Sync (Batched write)
+  const pushDeckToCloudSync = async () => {
+    if (!user) {
+      showToast("Please sign in first to push your deck to the cloud.", "error");
+      return;
+    }
+    setSyncingStatus("syncing");
+    try {
+      // 1. Fetch current cloud cards to delete them and overwrite with local deck state
+      const q = query(collection(db, "cards"), where("authorId", "==", user.uid));
+      const snapshot = await getDocs(q).catch(err => {
+        handleFirestoreError(err, OperationType.GET, "cards");
+      });
+      
+      const docSnaps = snapshot ? snapshot.docs : [];
+      
+      // Delete existing cards in batches of 400
+      const chunkSize = 400;
+      for (let i = 0; i < docSnaps.length; i += chunkSize) {
+        const chunk = docSnaps.slice(i, i + chunkSize);
+        const batch = writeBatch(db);
+        for (const docSnap of chunk) {
+          batch.delete(docSnap.ref);
+        }
+        await batch.commit();
+      }
+      
+      // 2. Batched write the local array of finalized cards with searchKeywords
+      for (let i = 0; i < cards.length; i += chunkSize) {
+        const chunk = cards.slice(i, i + chunkSize);
+        const batch = writeBatch(db);
+        for (const card of chunk) {
+          const docRef = doc(db, "cards", card.id);
+          const payload: any = {
+            id: card.id,
+            authorId: user.uid,
+            term: card.term,
+            definition: card.definition,
+            hint: card.hint || "",
+            confidence: card.confidence || "",
+            searchKeywords: generateSearchKeywords(card.term)
+          };
+          if (card.interval !== undefined) payload.interval = card.interval;
+          if (card.ease_factor !== undefined) payload.ease_factor = card.ease_factor;
+          if (card.next_review_date !== undefined) payload.next_review_date = card.next_review_date;
+          batch.set(docRef, payload);
+        }
+        await batch.commit();
+      }
+
+      // 3. Create and save the deck summary payload
+      const deckId = user.uid + "_" + Date.now();
+      const deckRef = doc(db, "decks", deckId);
+      const finalDeckTitle = deckTitle.trim() || (cards.length > 0 ? `${cards[0].term} Deck` : "My Study Deck");
+      const deckPayload = {
+        id: deckId,
+        title: finalDeckTitle,
+        description: `A custom study deck containing ${cards.length} cards.`,
+        cardCount: cards.length,
+        creatorName: user.displayName || user.email || "Unknown Architect",
+        searchKeywords: generateSearchKeywords(finalDeckTitle),
+        cardIds: cards.map(c => c.id)
+      };
+      await setDoc(deckRef, deckPayload);
+      
+      setSyncingStatus("synced");
+      showToast("✨ Finalized deck successfully pushed to Cloud Sync!", "success");
+    } catch (err: any) {
+      console.error("Failed to push deck to cloud sync: ", err);
+      setSyncingStatus("error");
+      setSyncError(err.message || String(err));
+      showToast("Push failed: " + (err.message || String(err)), "error");
+    }
+  };
+
+  // Unified wrappers for state mutations (Strictly Local-First Drafting config)
+  const addCards = (newCards: Flashcard[]) => {
+    setCards(prev => [...prev, ...newCards]);
+    showToast(`Added ${newCards.length} cards locally. Click 'Push Finalized Deck to Cloud Sync' to save.`, "info");
   };
 
   const addSingleCard = (card: Flashcard) => {
-    setCards(prev => [card, ...prev]);
-    if (user) {
-      dbAddCard(card);
-    }
+    setCards(prev => [...prev, card]);
+    showToast("Added card locally. Click 'Push Finalized Deck to Cloud Sync' to save.", "info");
   };
 
-  const deleteSingleCard = (cardId: string) => {
-    const filtered = cards.filter(c => c.id !== cardId);
-    setCards(filtered);
-    if (currentIdx >= filtered.length) {
-      setCurrentIdx(0);
-    }
-    if (user) {
-      dbDeleteCard(cardId);
-    }
-  };
+  const deleteSingleCard = React.useCallback((cardId: string) => {
+    setCards(prevCards => {
+      const filtered = prevCards.filter(c => c.id !== cardId);
+      setCurrentIdx(prevIdx => prevIdx >= filtered.length ? 0 : prevIdx);
+      return filtered;
+    });
+    showToast("Card deleted locally. Click 'Push Finalized Deck to Cloud Sync' to save.", "info");
+  }, [showToast]);
 
   // Spaced Repetition SM-2 scheduling algorithm helper
   const calculateSRS = (card: Flashcard, rating: "hard" | "good" | "easy") => {
@@ -1324,18 +1113,40 @@ export default function App() {
 
   // Sync effect on Authentication transitions
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-      setUser(currentUser);
-      setAuthLoading(false);
+    let internalUnsubscribe: () => void;
+    (async () => {
+      const { authService } = await import("./services/authService");
       
-      if (currentUser) {
-        setSyncingStatus("syncing");
-        try {
-          // Fetch existing cards from Firestore to compare
-          const q = query(collection(db, "cards"), where("userId", "==", currentUser.uid));
-          const snapshot = await getDocs(q).catch(err => {
-            handleFirestoreError(err, OperationType.GET, "cards");
-          });
+      try {
+        const redirectResult = await getRedirectResult(auth);
+        if (redirectResult) {
+          console.log("Verified auth redirect callback successfully resolved!");
+          showToast("Successfully authenticated via Google redirect!", "success");
+        }
+      } catch (redirectErr: any) {
+        console.error("Redirect auth resolution failed:", redirectErr);
+        if (redirectErr.code === "auth/credential-already-in-use" || redirectErr.code === "auth/email-already-in-use" || String(redirectErr).includes("already")) {
+          showToast("This Google account is already registered! Signed in securely.", "info");
+        } else {
+          setSyncError(`OAuth Redirect failed: ${redirectErr.message || String(redirectErr)}`);
+          showToast(`Redirect Auth Error: ${redirectErr.message || String(redirectErr)}`, "error");
+        }
+      }
+      
+      internalUnsubscribe = authService.initAuthSession(async (currentUser) => {
+        setUser(currentUser);
+        setAuthLoading(false);
+        
+        if (currentUser) {
+          if (isFetchingRef.current) return;
+          isFetchingRef.current = true;
+          setSyncingStatus("syncing");
+          try {
+            // Fetch existing cards from Firestore to compare
+            const q = query(collection(db, "cards"), where("authorId", "==", currentUser.uid));
+            const snapshot = await getDocs(q).catch(err => {
+              handleFirestoreError(err, OperationType.GET, "cards");
+            });
           
           let cloudCards: Flashcard[] = [];
           if (snapshot) {
@@ -1380,61 +1191,76 @@ export default function App() {
           console.error("Error syncing during login: ", err);
           setSyncingStatus("error");
           setSyncError(err.message || String(err));
+        } finally {
+          isFetchingRef.current = false;
         }
       } else {
         setSyncingStatus("offline");
       }
     });
-    return () => unsubscribe();
+
+    })();
+    return () => {
+      if (internalUnsubscribe) internalUnsubscribe();
+    }
   }, []);
+
+  // Synchronize dynamic card additions by reading the active deck's 'srsMap'
+  useEffect(() => {
+    let internalIsMounted = true;
+    if (!user || !activeDeckId) return;
+
+    const userDeckRef = doc(db, "users", user.uid, "personal_decks", activeDeckId);
+    
+    getDoc(userDeckRef).then((docSnap) => {
+      if (!internalIsMounted) return;
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        const srsMap = data.srsMap || {};
+        const cardIds = Object.keys(srsMap);
+        
+        setCards(currentCards => {
+          const currentIds = currentCards.map(c => c.id);
+          const hasDifferentElements = 
+            currentIds.length !== cardIds.length || 
+            currentIds.some(id => !cardIds.includes(id)) || 
+            cardIds.some(id => !currentIds.includes(id));
+          
+          if (hasDifferentElements) {
+             if (cardIds.length > 0) {
+                // Fetch in background to prevent blocking React update batching
+                setTimeout(() => {
+                  if (!internalIsMounted) return;
+                  dbEngine.fetchGlobalCardsByIds(cardIds).then(fetchedCards => {
+                    if (internalIsMounted) setCards(fetchedCards);
+                  }).catch(console.error);
+                }, 0);
+             } else {
+               // Empty deck
+               setTimeout(() => {
+                 if (internalIsMounted) setCards([]);
+               }, 0);
+             }
+          }
+          return currentCards;
+        });
+      }
+    }).catch(err => console.error("Failed to fetch personal deck data:", err));
+
+    return () => {
+      internalIsMounted = false;
+    };
+  }, [user, activeDeckId]);
+
+  // Sync through debounced hook
+  useDebouncedSave(user, cards, {studiedCount, bestMatchTime});
 
   // Save cards to localStorage automatically
   useEffect(() => {
     localStorage.setItem("learning_dashboard_cards", JSON.stringify(cards));
   }, [cards]);
 
-  // Handle study tracking with active review queue
-  const handleMastered = (mastered: boolean) => {
-    const currentCard = cards.find(c => c.id === sessionQueue[0]) || cards[0];
-    if (!currentCard) return;
 
-    // Update mastered status
-    const updated = cards.map(c => {
-      if (c.id === currentCard.id) {
-        return {
-          ...c,
-          isMastered: mastered
-        };
-      }
-      return c;
-    });
-    setCards(updated);
-    if (user) {
-      const cardToUpdate = updated.find(c => c.id === currentCard.id);
-      if (cardToUpdate) {
-        dbAddCard(cardToUpdate);
-      }
-    }
-
-    // Go to next card
-    setIsFlipped(false);
-    setShowHint(false);
-    
-    setTimeout(() => {
-      setSessionQueue(prev => {
-        if (prev.length === 0) return prev;
-        const currentId = prev[0];
-        const remaining = prev.slice(1);
-        if (mastered) {
-          // Mastered -> Remove from queue
-          return remaining;
-        } else {
-          // Review Again Soon -> Put back at end of queue
-          return [...remaining, currentId];
-        }
-      });
-    }, 320);
-  };
 
   // Helper to correctly handle quotes and commas inside CSV values
   const splitCSVLine = (line: string, delimiter: string = ","): string[] => {
@@ -1674,13 +1500,13 @@ To import Anki cards:
         doc.setFontSize(8);
         if (card.confidence === "easy") {
           doc.setTextColor(16, 185, 129); // Emerald
-          doc.text("EASY", margin + 145, y);
+          doc.text("MASTERED", margin + 145, y);
         } else if (card.confidence === "good") {
           doc.setTextColor(99, 102, 241); // Indigo
-          doc.text("GOOD", margin + 145, y);
+          doc.text("RECALLED", margin + 145, y);
         } else {
           doc.setTextColor(239, 68, 68); // Rose
-          doc.text("HARD", margin + 145, y);
+          doc.text("MISSED", margin + 145, y);
         }
       }
 
@@ -2004,7 +1830,7 @@ To import Anki cards:
   };
 
   // Manual Setup Deck Form submission
-  const handleAddCard = (e: React.FormEvent) => {
+  const handleAddCard = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTerm.trim() || !newDefinition.trim()) {
       alert("Please check that Term and Definition parameters are complete.");
@@ -2016,12 +1842,55 @@ To import Anki cards:
       term: newTerm.trim(),
       definition: newDefinition.trim(),
       hint: newHint.trim() || "No hint specified.",
-      confidence: "",
-      interval: 1,
-      ease_factor: 2.5,
-      next_review_date: new Date().toISOString(),
-      isMastered: false
+      searchKeywords: generateSearchKeywords(newTerm)
     };
+
+    if (user) {
+      try {
+        const newCardRef = doc(collection(db, "cards"));
+        brandCard.id = newCardRef.id;
+        
+        // 2. Automate the Dual-Write full document
+        await setDoc(newCardRef, { 
+          id: newCardRef.id, 
+          term: brandCard.term, 
+          definition: brandCard.definition, 
+          searchKeywords: brandCard.searchKeywords 
+        });
+
+        // 3. Update the user deck tracker map
+        const userDeckRef = doc(db, "users", user.uid, "personal_decks", activeDeckId);
+        
+        try {
+          await updateDoc(userDeckRef, {
+            [`srsMap.${newCardRef.id}`]: {
+              boxNumber: 1,
+              interval: 1,
+              isMastered: false,
+              next_review_date: new Date().toISOString()
+            }
+          });
+        } catch (e: any) {
+          if (e.code === 'not-found') {
+            await setDoc(userDeckRef, {
+              srsMap: {
+                [newCardRef.id]: {
+                  boxNumber: 1,
+                  interval: 1,
+                  isMastered: false,
+                  next_review_date: new Date().toISOString()
+                }
+              }
+            }, { merge: true });
+          } else {
+            throw e;
+          }
+        }
+      } catch (err) {
+        console.error("Failed to automatically link card reference to active deck context:", err);
+        // We gracefully continue local functionality even if dual write fails.
+      }
+    }
 
     addSingleCard(brandCard);
     setNewTerm("");
@@ -2030,13 +1899,13 @@ To import Anki cards:
   };
 
   // Delete card safely
-  const handleDeleteCard = (id: string) => {
+  const handleDeleteCard = React.useCallback((id: string) => {
     if (cards.length <= 1) {
       alert("At least one card must remain in the learning dashboard configuration.");
       return;
     }
     deleteSingleCard(id);
-  };
+  }, [cards.length, deleteSingleCard]);
 
   // Parse Raw Clipboard text regex parser splitting at colons or hyphens and cleansing markers
   const runLocalRegexParser = () => {
@@ -2211,8 +2080,18 @@ To import Anki cards:
     }
   };
 
+  const filteredInventoryCards = React.useMemo(() => {
+    const query = deckSearchQuery.trim().toLowerCase();
+    if (!query) return cards;
+    return cards.filter(card => 
+      card.term.toLowerCase().includes(query) ||
+      card.definition.toLowerCase().includes(query) ||
+      (card.hint && card.hint.toLowerCase().includes(query))
+    );
+  }, [cards, deckSearchQuery]);
+
   return (
-    <div id="deck-workspace" className={`flex flex-col lg:flex-row h-screen w-screen transition-colors duration-300 ${stylesObj.rootBg} p-4 gap-4 overflow-hidden font-sans antialiased selection:bg-indigo-500/30 selection:text-indigo-200`}>
+    <div id="deck-workspace" className={`flex flex-col lg:flex-row min-h-screen w-full transition-colors duration-300 ${stylesObj.rootBg} p-4 gap-4 overflow-y-auto overflow-x-hidden font-sans antialiased selection:bg-indigo-500/30 selection:text-indigo-200`}>
       
       {/* Sidebar navigation panel - Clean Minimalism layout */}
       <aside className="w-full lg:w-56 flex flex-col gap-2 py-2 lg:py-4 shrink-0 justify-between lg:justify-start">
@@ -2291,7 +2170,7 @@ To import Anki cards:
             }`}
           >
             <span className="text-base select-none">🎴</span>
-            <span>Flashcards</span>
+            <span>My Workspace</span>
           </button>
 
           <button
@@ -2332,31 +2211,66 @@ To import Anki cards:
             <span className="text-base select-none">⚙️</span>
             <span>Deck Setup</span>
           </button>
+          <button
+            id="tab-btn-search"
+            onClick={() => setActiveTab("search")}
+            className={`flex items-center gap-3 px-4 py-3 rounded-xl transition-all whitespace-nowrap cursor-pointer shrink-0 text-xs font-semibold uppercase tracking-wider border-2 ${
+              activeTab === "search"
+                ? (isDark ? "bg-slate-900 text-white border-indigo-500 shadow-[0_0_15px_rgba(99,102,241,0.25)]" : "bg-white text-indigo-700 border-indigo-600 shadow-md")
+                : (isDark ? "border-slate-800 text-slate-400 hover:bg-slate-850 hover:border-slate-700 hover:text-slate-200" : "border-slate-200 text-slate-600 hover:bg-slate-100 hover:border-slate-300 hover:text-slate-900")
+            }`}
+          >
+            <span className="text-base select-none">🔍</span>
+            <span>Global Finder</span>
+          </button>
+          <button
+            id="tab-btn-sync"
+            onClick={() => {
+              if (user) {
+                setSyncingStatus("syncing");
+                flushSessionBufferToCloud()
+                  .then(() => {
+                    setSyncingStatus("synced");
+                    showToast("Sync completed! Session buffer committed peacefully.", "success");
+                  })
+                  .catch((err: any) => {
+                    setSyncingStatus("error");
+                    showToast("Sync failed: " + err.message, "error");
+                  });
+              } else {
+                showToast("Please sign in to sync your study cards.", "info");
+              }
+            }}
+            className={`flex items-center justify-center gap-3 px-4 py-3 rounded-xl transition-all whitespace-nowrap cursor-pointer shrink-0 text-xs font-semibold uppercase tracking-wider border-2 ${isDark ? "border-slate-800 text-slate-300 hover:bg-slate-850 hover:border-slate-700 hover:text-white" : "bg-white text-slate-800 border-slate-200 hover:bg-slate-50 shadow-sm"}`}
+          >
+            <RotateCw className={`w-4 h-4 ${syncingStatus === "syncing" ? "animate-spin" : ""}`} />
+            <span>Sync Data</span>
+          </button>
         </div>
 
         {/* Sidebar Status and Telemetry Block */}
-        <div className="mt-auto hidden lg:flex flex-col gap-3">
+        <div className="mt-auto hidden lg:flex flex-col gap-3 pb-2">
           {/* Deck Telemetry Widget */}
-          <div className="p-4 glass-card bg-slate-800/30 text-xs space-y-2 select-none">
-            <p className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">Metrics Widget</p>
-            <div className="flex justify-between items-center text-slate-300 font-sans">
+          <div className={`p-4 backdrop-blur-md ${isDark ? "bg-indigo-950/70 border-indigo-500/30 text-indigo-200" : "bg-indigo-50 border-indigo-200 text-indigo-800 shadow-sm"} text-xs space-y-2 select-none border rounded-xl`}>
+            <p className={`text-[10px] uppercase tracking-widest ${isDark ? "text-indigo-300" : "text-indigo-600"} font-bold`}>Metrics Widget</p>
+            <div className="flex justify-between items-center font-sans">
               <span>Deck Cards:</span>
-              <span className="font-bold text-white font-mono">{cards.length}</span>
+              <span className={`font-bold ${isDark ? "text-indigo-100" : "text-indigo-900"} font-mono`}>{cards.length}</span>
             </div>
             {bestMatchTime > 0 && (
-              <div className="flex flex-col gap-0.5 text-slate-300 border-t border-slate-800/60 pt-1.5 mt-1 font-sans">
+              <div className={`flex flex-col gap-0.5 border-t ${isDark ? "border-indigo-500/20" : "border-indigo-100"} pt-1.5 mt-1 font-sans`}>
                 <span>Match Highscore:</span>
-                <span className="font-mono text-[10px] text-emerald-400">{formatTime(bestMatchTime)}</span>
+                <span className="font-mono text-[10px] text-emerald-500 font-bold">{formatTime(bestMatchTime)}</span>
               </div>
             )}
           </div>
 
-          <div className="p-4 glass-card bg-indigo-950/40 border border-slate-800/80 rounded-xl space-y-3">
-            <p className="text-[10px] uppercase tracking-widest text-indigo-400 font-bold">Cloud Sync Hub</p>
+          <div className={`p-4 backdrop-blur-md ${isDark ? "bg-violet-950/70 border-violet-500/30 text-violet-200" : "bg-violet-50 border-violet-200 shadow-sm"} border rounded-xl space-y-3`}>
+            <p className={`text-[10px] uppercase tracking-widest ${isDark ? "text-violet-300" : "text-violet-600"} font-bold`}>Cloud Sync Hub</p>
             
             {authLoading ? (
-              <div className="flex items-center gap-2 text-xs text-slate-400">
-                <RotateCw className="w-3 h-3 animate-spin text-indigo-400" />
+              <div className={`flex items-center gap-2 text-xs ${isDark ? "text-violet-300" : "text-violet-700"}`}>
+                <RotateCw className={`w-3 h-3 animate-spin ${isDark ? "text-violet-400" : "text-violet-500"}`} />
                 <span>Initializing link...</span>
               </div>
             ) : user ? (
@@ -2366,270 +2280,315 @@ To import Anki cards:
                     <img 
                       src={user.photoURL} 
                       alt="user" 
-                      className="w-5 h-5 rounded-full border border-indigo-500/50" 
+                      className={`w-5 h-5 rounded-full border ${isDark ? "border-violet-500/50" : "border-violet-300"}`} 
                       referrerPolicy="no-referrer"
                     />
                   ) : (
-                    <div className="w-5 h-5 rounded-full bg-indigo-600 flex items-center justify-center text-[10px] font-bold text-white">
-                      {user.displayName?.charAt(0) || "U"}
+                    <div className={`w-5 h-5 rounded-full ${isDark ? "bg-violet-900 text-violet-100 border border-violet-500/20" : "bg-violet-100 text-violet-800 border border-violet-300"} flex items-center justify-center text-[10px] font-bold`}>
+                      {user.isAnonymous ? "G" : (user.displayName?.charAt(0) || user.email?.charAt(0)?.toUpperCase() || "U")}
                     </div>
                   )}
                   <div className="min-w-0 flex-1">
-                    <p className="text-[11px] font-medium text-slate-200 truncate">{user.displayName || "User account"}</p>
-                    <p className="text-[9px] text-slate-500 truncate">{user.email}</p>
+                    <p className={`text-[11px] font-bold ${isDark ? "text-violet-100" : "text-violet-900"} truncate`}>
+                      {user.isAnonymous ? "Guest Sync Session" : (user.displayName || "Active User")}
+                    </p>
+                    <p className={`text-[9px] ${isDark ? "text-violet-300/80" : "text-violet-600"} truncate`}>
+                      {user.isAnonymous ? "Guest (No domain setup required!)" : (user.email || "Linked session")}
+                    </p>
                   </div>
                 </div>
 
-                <div className="flex items-center justify-between text-[10px] border-t border-slate-800/60 pt-2">
+                <div className={`flex items-center justify-between text-[10px] border-t ${isDark ? "border-violet-800/40" : "border-violet-200/60"} pt-2`}>
                   <div className="flex items-center gap-1.5">
                     {syncingStatus === "syncing" && (
                       <>
                         <div className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></div>
-                        <span className="text-amber-400 font-mono">Syncing...</span>
+                        <span className="text-amber-500 font-mono">Syncing...</span>
                       </>
                     )}
                     {syncingStatus === "synced" && (
                       <>
                         <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></div>
-                        <span className="text-emerald-400 font-mono font-bold">Cloud Active</span>
+                        <span className="text-emerald-500 font-mono font-bold">Cloud Active</span>
                       </>
                     )}
                     {syncingStatus === "offline" && (
                       <>
                         <div className="w-1.5 h-1.5 rounded-full bg-slate-500"></div>
-                        <span className="text-slate-400 font-mono">Local Only</span>
+                        <span className="text-slate-500 font-mono">Local Only</span>
                       </>
                     )}
                     {syncingStatus === "error" && (
                       <>
                         <div className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-bounce"></div>
-                        <span className="text-rose-400 font-mono">Err Rules</span>
+                        <span className="text-rose-500 font-mono">Err Rules</span>
                       </>
                     )}
                   </div>
                   
                   <button 
                     onClick={handleSignOut}
-                    className="text-[9px] font-bold uppercase tracking-wider text-rose-400 hover:text-rose-300 transition-colors cursor-pointer"
+                    className={`text-[9px] font-bold uppercase tracking-wider ${isDark ? "text-rose-400 hover:text-rose-300" : "text-rose-600 hover:text-rose-500"} transition-colors cursor-pointer`}
                   >
-                    Logout
+                    Disconnect
                   </button>
                 </div>
+
+                {/* Offer permanent upgrade/login options if current session is Guest */}
+                {user.isAnonymous && (
+                  <div className={`mt-3 pt-2.5 border-t border-dashed ${isDark ? "border-violet-800/45" : "border-violet-200/80"} space-y-2`}>
+                    <p className={`text-[9px] leading-snug ${isDark ? "text-violet-350" : "text-violet-700"} font-medium`}>
+                      Your current session is Guest. Connect a Google or Email profile to persist your flashcards forever:
+                    </p>
+                    <div className="space-y-1.5">
+                      <button
+                        onClick={() => handleGoogleSignIn(false)}
+                        className="w-full flex items-center justify-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-[10px] text-white py-1 px-2.5 rounded-xl transition-all font-semibold active:scale-95 cursor-pointer shadow-sm"
+                      >
+                        <Sparkles className="w-3 h-3 text-indigo-200" />
+                        <span>Link with Google</span>
+                      </button>
+                      
+                      <div className="text-center pt-0.5">
+                        <button
+                          type="button"
+                          onClick={() => setShowEmailForm(!showEmailForm)}
+                          className={`text-[9px] ${isDark ? "text-indigo-400 hover:text-indigo-300" : "text-indigo-600 hover:text-indigo-800"} underline font-medium cursor-pointer`}
+                        >
+                          {showEmailForm ? "Hide Email Setup" : "Link with Email & Password"}
+                        </button>
+                      </div>
+
+                      {showEmailForm && (
+                        <form onSubmit={handleEmailAuth} className="space-y-2 bg-slate-950/60 p-2.5 rounded-xl border border-slate-850 animate-fade-in text-left">
+                          <p className="text-[8px] font-bold text-indigo-400 uppercase tracking-widest">
+                            {emailFormMode === "login" ? "Email Login" : "Email Sign Up / Link"}
+                          </p>
+                          
+                          <div className="space-y-1">
+                            <input
+                              type="email"
+                              value={emailInput}
+                              onChange={(e) => setEmailInput(e.target.value)}
+                              placeholder="Email address"
+                              className="w-full bg-slate-900 border border-slate-800 focus:border-indigo-500 rounded-lg px-2 py-0.5 text-[9px] text-slate-200 outline-none transition-all placeholder:text-slate-600 font-sans"
+                              required
+                            />
+                          </div>
+                          
+                          <div className="space-y-1">
+                            <input
+                              type="password"
+                              value={passwordInput}
+                              onChange={(e) => setPasswordInput(e.target.value)}
+                              placeholder="Password"
+                              className="w-full bg-slate-900 border border-slate-800 focus:border-indigo-500 rounded-lg px-2 py-0.5 text-[9px] text-slate-200 outline-none transition-all placeholder:text-slate-600 font-sans"
+                              required
+                            />
+                          </div>
+
+                          <button
+                            type="submit"
+                            className="w-full bg-indigo-600 hover:bg-indigo-500 text-[9px] text-white py-0.5 px-2 rounded font-bold transition-all uppercase tracking-wider cursor-pointer"
+                          >
+                            {emailFormMode === "login" ? "Sign In" : "Register & Link"}
+                          </button>
+
+                          <div className="text-center pt-1 border-t border-slate-850">
+                            <button
+                              type="button"
+                              onClick={() => setEmailFormMode(emailFormMode === "login" ? "signup" : "login")}
+                              className="text-[8px] text-slate-400 hover:text-slate-300 underline transition-all cursor-pointer"
+                            >
+                              {emailFormMode === "login" ? "Need an account? Sign up" : "Have an email account? Log in"}
+                            </button>
+                          </div>
+                        </form>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="space-y-2">
-                <p className="text-[10px] text-slate-400 leading-relaxed font-sans">
-                  Sync your study cards and game stats to our cloud database to access from home servers or anywhere.
+                <p className={`text-[10px] ${isDark ? "text-slate-400" : "text-slate-600"} leading-relaxed font-sans`}>
+                  Sync study cards and stats securely. Use Google, Email, or Guest session.
                 </p>
-                <button
-                  id="sign-in-btn"
-                  onClick={handleGoogleSignIn}
-                  className="w-full flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-[11px] text-white py-2 px-3 rounded-xl transition-all font-semibold active:scale-95 cursor-pointer shadow-[0_0_12px_rgba(79,70,229,0.2)]"
-                >
-                  <Sparkles className="w-3.5 h-3.5 text-indigo-200" />
-                  <span>Google Cloud Sync</span>
-                </button>
+                <div className="space-y-1.5">
+                  <button
+                    id="sign-in-btn"
+                    onClick={handleGoogleSignIn}
+                    className="w-full flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-[11px] text-white py-1.5 px-3 rounded-xl transition-all font-semibold active:scale-95 cursor-pointer shadow-[0_0_12px_rgba(79,70,229,0.2)]"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-indigo-200" />
+                    <span>Google Cloud Sync</span>
+                  </button>
+                  <button
+                    onClick={handleAnonymousSignIn}
+                    className={`w-full text-center text-[10px] ${isDark ? "text-indigo-200 hover:text-white" : "text-indigo-600 hover:text-indigo-800"} underline font-medium cursor-pointer block`}
+                  >
+                    Or enter as Guest (no setup)
+                  </button>
+                  <div className={`text-center pt-0.5 border-t ${isDark ? "border-slate-800/20" : "border-indigo-200/50"}`}>
+                    <button
+                      type="button"
+                      onClick={() => setShowEmailForm(!showEmailForm)}
+                      className={`text-[10px] ${isDark ? "text-indigo-400 hover:text-indigo-300" : "text-indigo-600 hover:text-indigo-800"} underline font-medium cursor-pointer`}
+                    >
+                      {showEmailForm ? "Hide Email Login" : "Or use Email / Password"}
+                    </button>
+                  </div>
+
+                  {showEmailForm && (
+                    <form onSubmit={handleEmailAuth} className="space-y-2 bg-slate-950/60 p-2.5 rounded-xl border border-slate-850 animate-fade-in text-left">
+                      <p className="text-[9px] font-bold text-indigo-400 uppercase tracking-widest">
+                        {emailFormMode === "login" ? "Email Login" : "Email Sign Up"}
+                      </p>
+                      
+                      <div className="space-y-1">
+                        <input
+                          type="email"
+                          value={emailInput}
+                          onChange={(e) => setEmailInput(e.target.value)}
+                          placeholder="Email address"
+                          className="w-full bg-slate-900 border border-slate-800 focus:border-indigo-500 rounded-lg px-2.5 py-1 text-[10px] text-slate-200 outline-none transition-all placeholder:text-slate-600 font-sans"
+                          required
+                        />
+                      </div>
+                      
+                      <div className="space-y-1">
+                        <input
+                          type="password"
+                          value={passwordInput}
+                          onChange={(e) => setPasswordInput(e.target.value)}
+                          placeholder="Password"
+                          className="w-full bg-slate-900 border border-slate-800 focus:border-indigo-500 rounded-lg px-2.5 py-1 text-[10px] text-slate-200 outline-none transition-all placeholder:text-slate-600 font-sans"
+                          required
+                        />
+                      </div>
+
+                      <button
+                        type="submit"
+                        className="w-full bg-indigo-600 hover:bg-indigo-500 text-[10px] text-white py-1 px-3 rounded-lg font-bold transition-all uppercase tracking-wider cursor-pointer"
+                      >
+                        {emailFormMode === "login" ? "Sign In" : "Register"}
+                      </button>
+
+                      <div className="text-center pt-1 border-t border-slate-850">
+                        <button
+                          type="button"
+                          onClick={() => setEmailFormMode(emailFormMode === "login" ? "signup" : "login")}
+                          className="text-[9px] text-slate-400 hover:text-slate-300 underline transition-all cursor-pointer"
+                        >
+                          {emailFormMode === "login" ? "Need an account? Sign up" : "Have an email account? Log in"}
+                        </button>
+                      </div>
+                    </form>
+                  )}
+                </div>
               </div>
             )}
             
             {syncError && (
-              <p className="text-[9px] text-rose-400 font-mono max-h-12 overflow-y-auto mt-1 leading-tighter">
-                {syncError}
-              </p>
+              <div className="mt-2 text-[9px] leading-relaxed font-mono relative">
+                {syncError.toLowerCase().includes("unauthorized") || syncError.toLowerCase().includes("domain") ? (
+                  <div className="text-rose-450 space-y-2 bg-slate-950/40 p-2.5 rounded-lg border border-rose-500/10">
+                    <div className="flex items-center justify-between">
+                      <p className="font-sans font-bold text-[10px] text-rose-400">⚠️ Auth Domain Error:</p>
+                      <button 
+                        type="button" 
+                        onClick={() => setSyncError(null)}
+                        className="text-[9px] font-sans text-rose-300 hover:text-rose-200 hover:underline bg-rose-500/10 hover:bg-rose-500/20 px-1.5 py-0.5 rounded cursor-pointer transition-all"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                    <p className="text-slate-400 font-sans text-[10px]">
+                      Add <code className="bg-slate-900 border border-slate-800 px-1 py-0.5 rounded text-rose-300 font-mono text-[9px] block select-all mt-1">{window.location.hostname}</code> to <strong>Authorized Domains</strong> in Firebase Console (Auth &gt; Settings).
+                    </p>
+                    <div className="pt-2 border-t border-slate-800/40 space-y-1 text-slate-300 font-sans text-[10px]">
+                      <p className="text-teal-400 font-semibold">⚡ Seamless Alternative:</p>
+                      <p className="text-[9px] text-slate-400">
+                        Email & Password authentication works instantly on ANY custom website without any domain setup!
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowEmailForm(true);
+                          setSyncError(null);
+                        }}
+                        className="w-full mt-1.5 bg-indigo-650 hover:bg-indigo-600 text-white font-sans text-[10px] font-bold py-1 px-2.5 rounded-xl transition active:scale-95 cursor-pointer text-center"
+                      >
+                        Link with Email & Password Now
+                      </button>
+                    </div>
+                  </div>
+                ) : syncError.toLowerCase().includes("popup") || syncError.toLowerCase().includes("blocked") ? (
+                  <div className="text-amber-400 space-y-2 bg-slate-950/50 p-2.5 rounded-lg border border-amber-500/20 font-sans text-[10px]">
+                    <div className="flex items-center justify-between">
+                      <p className="font-bold text-amber-400 text-[10px] flex items-center gap-1">⚠️ Popup Blocked</p>
+                      <button 
+                        type="button" 
+                        onClick={() => setSyncError(null)}
+                        className="text-[9px] font-sans text-amber-300 hover:text-amber-200 hover:underline bg-amber-550/10 px-1.5 py-0.5 rounded cursor-pointer transition-all"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                    <p className="text-slate-300 leading-normal text-[9px]">
+                      Your browser blocked the Google Sign-In popup. Please click the blocked popup icon in your browser's search or address bar and choose <strong>"Always allow popups"</strong> for this domain.
+                    </p>
+                    <div className="pt-2 border-t border-slate-800/40 space-y-1.5 font-sans">
+                      <p className="text-teal-400 font-semibold text-[10px]">⚡ Instant Alternative:</p>
+                      <p className="text-[9px] text-slate-400 leading-normal">
+                        You can link and persist your cards instantly using the Email & Password option below, requiring no popup permissions.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowEmailForm(true);
+                          setSyncError(null);
+                        }}
+                        className="w-full mt-1 bg-indigo-650 hover:bg-indigo-600 text-white font-sans text-[10px] font-bold py-1 px-2.5 rounded-xl transition active:scale-95 cursor-pointer text-center"
+                      >
+                        Link with Email & Password
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-rose-455 bg-slate-950/40 p-2 rounded-lg border border-rose-500/10 flex items-center justify-between gap-2">
+                    <p className="truncate flex-1">{syncError}</p>
+                    <button 
+                      type="button" 
+                      onClick={() => setSyncError(null)}
+                      className="text-[9px] text-rose-300 hover:text-rose-200 font-sans hover:underline cursor-pointer"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                )}
+              </div>
             )}
           </div>
         </div>
       </aside>
 
       {/* Main Container Content Area with Clean Minimalism styling */}
-      <main className="flex-1 overflow-y-auto custom-scrollbar bg-slate-900/20 rounded-2xl p-2 lg:p-6 flex flex-col gap-4">
+      <main className="flex-1 bg-slate-900/20 rounded-2xl p-2 lg:p-6 flex flex-col gap-4">
         
         {/* Tab content renderer router */}
-        <div className="min-h-0 flex-1 flex flex-col">
+        <div className="flex-1 flex flex-col">
           
           {/* TAB A: 3D FLASHCARD CAROUSEL WITH SRS */}
           {activeTab === "flashcards" && (
-            <div className="max-w-2xl mx-auto space-y-6">
-              
-              {/* Progress Panel */}
-              <div className={`${stylesObj.panelBg} p-4 rounded-xl border flex items-center justify-between flex-wrap gap-3`}>
-                <span className={`text-sm font-semibold ${stylesObj.textHeading} font-sans block`}>
-                  {sessionQueue.length > 0 ? `Card ${activeCardIndex + 1} of ${cards.length}` : "Deck Review session"}
-                </span>
-                
-                <div className={`w-48 ${isDark ? "bg-slate-800" : "bg-slate-200"} rounded-full h-2 overflow-hidden shadow-inner`}>
-                  <div 
-                    className="bg-indigo-600 dark:bg-indigo-505 h-full transition-all duration-300 shadow-[0_0_10px_rgba(99,102,241,0.5)]"
-                    style={{ width: `${cards.length > 0 ? Math.round((Math.max(0, cards.length - sessionQueue.length) / cards.length) * 100) : 0}%` }}
-                  />
-                </div>
-                
-                <span className={`text-xs font-mono px-2.5 py-0.5 rounded-full ${stylesObj.badgeActive}`}>
-                  {cards.length > 0 ? Math.round((Math.max(0, cards.length - sessionQueue.length) / cards.length) * 100) : 0}% Mastered ({sessionQueue.length} remaining)
-                </span>
-              </div>
-
-              {cards.length === 0 ? (
-                <div className="bg-slate-900/40 border border-slate-900 rounded-3xl p-12 text-center space-y-4">
-                  <HelpCircle className="w-12 h-12 text-slate-600 mx-auto" />
-                  <h3 className="text-lg font-bold text-slate-200">No Flashcards Generated Yet</h3>
-                  <p className="text-sm text-slate-400 max-w-sm mx-auto">
-                    Configure your study layout by building new manual definitions or using the AI engine generators.
-                  </p>
-                  <button
-                    onClick={() => setActiveTab("setup")}
-                    className="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2.5 rounded-xl font-medium text-sm transition-all cursor-pointer shadow-md inline-flex items-center gap-2"
-                  >
-                    Configure Deck <Plus className="w-4 h-4" />
-                  </button>
-                </div>
-              ) : sessionQueue.length === 0 ? (
-                <div className="bg-slate-900/40 border-2 border-dashed border-indigo-500/20 rounded-3xl p-12 text-center space-y-5 shadow-xl animate-fade-in my-4">
-                  <Award className="w-16 h-16 text-indigo-400 mx-auto animate-pulse" />
-                  <div>
-                    <h3 className="text-xl font-bold text-slate-100 font-sans">Study Session Complete! 🎉</h3>
-                    <p className="text-sm text-slate-400 max-w-md mx-auto mt-1 leading-relaxed">
-                      Amazing job! You have fully graduated all flashcards in this deck. 
-                      Any cards evaluated as <span className="text-rose-455 font-bold text-rose-400">"Hard"</span> were repeated continuously until you mastered them!
-                    </p>
-                  </div>
-                  <div className="pt-2 flex justify-center gap-3 flex-wrap">
-                    <button
-                      onClick={() => setSessionQueue(cards.map(c => c.id))}
-                      className="bg-indigo-600 hover:bg-indigo-500 text-white px-6 py-3 rounded-xl font-bold text-xs uppercase tracking-widest transition-all cursor-pointer shadow-md inline-flex items-center gap-2 border-2 border-indigo-700 hover:border-indigo-400"
-                    >
-                      <RotateCw className="w-4 h-4" /> Study Again
-                    </button>
-                    <button
-                      onClick={exportDeckToPDF}
-                      className="bg-slate-950 hover:bg-slate-900 text-indigo-300 px-6 py-3 rounded-xl font-bold text-xs uppercase tracking-widest transition-all cursor-pointer shadow-md inline-flex items-center gap-2 border-2 border-slate-800 hover:border-indigo-500/30"
-                    >
-                      <Download className="w-4 h-4" /> Export Deck PDF
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-8">
-                  {/* Card 3D Stage perspective wrapper */}
-                  <div className="perspective-1000 w-full min-h-[340px]">
-                    <div 
-                      onClick={() => setIsFlipped(!isFlipped)}
-                      className={`relative w-full min-h-[340px] preserve-3d transition-transform duration-300 cursor-pointer rounded-3xl shadow-[0_0_40px_rgba(0,0,0,0.5)] border border-slate-900/60 ${
-                        isFlipped ? "rotate-y-180" : ""
-                      }`}
-                    >
-                      {/* Front face (Term) */}
-                      <div className={`absolute inset-0 w-full h-full bg-gradient-to-br ${stylesObj.cardFront} p-8 rounded-3xl backface-hidden flex flex-col justify-between border transition-all duration-300`}>
-                        <div className="flex justify-between items-center text-slate-400 text-xs">
-                          <span className={`font-mono uppercase tracking-widest font-semibold flex items-center gap-1.5 px-3 py-1 rounded-full ${stylesObj.badgeActive}`}>
-                            <RotateCw className="w-3.5 h-3.5 animate-spin-slow" /> Front • Term
-                          </span>
-                          <span className={`${isDark ? "bg-slate-800/60 text-slate-400" : "bg-slate-200/70 text-slate-600"} px-3 py-1 rounded-full font-semibold`}>Click to flip card</span>
-                        </div>
-
-                        <div className="text-center my-auto px-4 py-8">
-                        <div className="flex items-center justify-center gap-2">
-                          <h2 className={`text-3xl sm:text-4xl font-extrabold ${isDark ? "text-white" : "text-indigo-950"} tracking-tight leading-tight select-none`}>
-                            {activeCard?.term}
-                          </h2>
-                          <button
-                            onClick={() => {
-                              const utterance = new SpeechSynthesisUtterance(activeCard?.term);
-                              window.speechSynthesis.speak(utterance);
-                            }}
-                            className={`p-2 rounded-full transition-colors ${isDark ? "hover:bg-slate-800 text-slate-400" : "hover:bg-slate-200 text-slate-500"}`}
-                            aria-label="Speak term"
-                          >
-                            <Volume2 className="w-6 h-6" />
-                          </button>
-                        </div>
-                        </div>
-
-                        <div className="text-xs text-center text-slate-500 flex items-center justify-center gap-1 font-mono select-none">
-                          <GraduationCap className="w-4 h-4 text-slate-400" /> Confidence rating buttons below assess spacing intervals
-                        </div>
-                      </div>
-
-                      {/* Back face (Definition) */}
-                      <div className={`absolute inset-0 w-full h-full bg-gradient-to-br ${stylesObj.cardBack} p-8 rounded-3xl backface-hidden rotate-y-180 flex flex-col justify-between border transition-all duration-300`}>
-                        <div className="flex justify-between items-center text-slate-400 text-xs">
-                          <span className={`font-mono uppercase tracking-widest font-semibold flex items-center gap-1.5 px-3 py-1 rounded-full animate-pulse ${stylesObj.badgeGreen}`}>
-                            <CheckCircle2 className="w-3.5 h-3.5" /> Back • Definition
-                          </span>
-                          <span className={`${isDark ? "bg-slate-800/60 text-slate-400" : "bg-slate-200/70 text-slate-600"} px-3 py-1 rounded-full font-semibold`}>Click to flip term</span>
-                        </div>
-
-                        <div className="text-center my-auto px-4 py-6">
-                          <p className={`text-lg sm:text-xl ${isDark ? "text-slate-100" : "text-slate-800"} font-medium leading-relaxed tracking-normal max-w-md mx-auto select-none`}>
-                            {activeCard?.definition}
-                          </p>
-                        </div>
-
-                        <div className="text-xs text-center text-slate-400 font-mono select-none">
-                          Flip back to see keyword references
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Expandable Context / Hint Container */}
-                  <div className={`p-4 border rounded-2xl transition-all duration-300 ${stylesObj.panelBg}`}>
-                    <button
-                      onClick={() => setShowHint(!showHint)}
-                      className="w-full flex items-center justify-between text-indigo-500 dark:text-indigo-400 hover:text-indigo-600 dark:hover:text-indigo-300 font-semibold text-sm transition-all focus:outline-none cursor-pointer"
-                    >
-                      <span className="flex items-center gap-1.5">
-                        <HelpCircle className="w-4 h-4" />
-                        {showHint ? "Hide Context / Study Hint" : "Reveal Context / Study Hint"}
-                      </span>
-                      <span className={`text-xs px-2 py-0.5 rounded font-mono ${isDark ? "bg-slate-800/50 border border-slate-700/20 text-indigo-300" : "bg-slate-100 border border-slate-200 text-indigo-700"}`}>
-                        {showHint ? "[-]" : "[+]"}
-                      </span>
-                    </button>
-                    {showHint && (
-                      <div className={`mt-3 text-sm px-1 pt-1 border-t ${stylesObj.border} leading-relaxed font-mono ${stylesObj.textMuted}`}>
-                        {activeCard?.hint || "No secondary hints logged for this term."}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Anki Confidence Rating Panel */}
-                  <div className="bg-slate-900/20 p-5 rounded-2xl border border-slate-900 space-y-4">
-                    <span className={`block text-xs font-semibold text-center uppercase tracking-wider font-mono ${isDark ? "text-slate-300" : "text-slate-800"}`}>
-                      Evaluate active recall accuracy:
-                    </span>
-                    
-                    <div className="grid grid-cols-2 gap-3">
-                      <button
-                        onClick={() => handleMastered(true)}
-                        className={`py-3.5 rounded-xl text-sm font-semibold transition-all cursor-pointer flex flex-col items-center gap-1 shadow-md
-                          ${isDark
-                            ? "bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 hover:text-emerald-100 border-2 border-emerald-500/40 hover:border-emerald-500/80 shadow-emerald-950/20"
-                            : "bg-emerald-100 hover:bg-emerald-200 text-emerald-950 hover:text-emerald-900 border-2 border-emerald-400 hover:border-emerald-500"
-                          }
-                        `}
-                      >
-                        <CheckCircle2 className={`w-5 h-5 ${isDark ? "text-emerald-400" : "text-emerald-700"}`} />
-                        Mastered
-                      </button>
-
-                      <button
-                        onClick={() => handleMastered(false)}
-                        className={`py-3.5 rounded-xl text-sm font-semibold transition-all cursor-pointer flex flex-col items-center gap-1 shadow-md
-                          ${isDark
-                            ? "bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 hover:text-indigo-100 border-2 border-indigo-500/40 hover:border-indigo-500/80 shadow-indigo-950/20"
-                            : "bg-indigo-100 hover:bg-indigo-200 text-indigo-950 hover:text-indigo-900 border-2 border-indigo-400 hover:border-indigo-500"
-                          }
-                        `}
-                      >
-                        <RotateCw className={`w-5 h-5 ${isDark ? "text-indigo-400" : "text-indigo-700"}`} />
-                        Review Again Soon
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
+            <FlashcardStudyView
+               isDark={isDark}
+               stylesObj={stylesObj}
+               userId={user?.uid}
+               activeDeckId={activeDeckId === "active_default_deck" ? "primary_default_uuid" : activeDeckId}
+               onOpenSetup={() => setActiveTab("setup")}
+               exportDeckToPDF={exportDeckToPDF}
+            />
           )}
 
           {/* TAB B: EXAM CENTER */}
@@ -2686,7 +2645,7 @@ To import Anki cards:
                         {examScore >= 80 
                           ? "Exceptional retention rate. Your confidence interval spacing matrices can be extended!" 
                           : examScore >= 60 
-                          ? "Good study groundwork. Review 'Hard' flagged terms within SRS review queue." 
+                          ? "Good study groundwork. Review 'Missed' flagged terms within SRS review queue." 
                           : "Sub-optimal baseline. Utilize timed match grids to cement key terms."}
                       </p>
                     </div>
@@ -2931,16 +2890,355 @@ To import Anki cards:
             </div>
           )}
 
-          {/* TAB D: DECK SETUP & SINGLE STREAM GENERATORS */}
+          {/* TAB: SEARCH */}
+          {activeTab === "search" && (
+            <section className="animate-in fade-in duration-500 max-w-4xl mx-auto">
+              <div className="p-8 bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-xl">
+                <SearchBarView 
+                  currentDeckId={activeDeckId} 
+                  onItemsAdded={(newCards) => {
+                    setCards(prev => {
+                      // Avoid duplicates
+                      const existingIds = new Set(prev.map(c => c.id));
+                      const toAdd = newCards.filter(c => !existingIds.has(c.id));
+                      return [...prev, ...toAdd];
+                    });
+                    showToast(`Added ${newCards.length} items to your deck inventory.`, "success");
+                  }} 
+                />
+              </div>
+            </section>
+          )}
+                           {/* TAB D: DECK SETUP & SINGLE STREAM GENERATORS */}
           {activeTab === "setup" && (
             <div className="max-w-6xl mx-auto space-y-6">
+
+              {/* Deck lists inventory manager */}
+              <div className={`${stylesObj.panelBg} rounded-2xl border p-6 space-y-4`}>
+                <div className={`flex justify-between items-center flex-wrap gap-4 border-b ${stylesObj.border} pb-4`}>
+                  <div>
+                    <h4 className={`text-base font-bold ${stylesObj.textHeading} flex items-center gap-1.5`}>
+                      <FileText className="w-5 h-5 text-indigo-500 dark:text-indigo-400" /> Deck Inventory Configuration
+                    </h4>
+                    <p className={`text-xs ${stylesObj.textMuted} font-sans`}>Review, modify, or eliminate generated card listings</p>
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <input
+                      type="text"
+                      value={deckTitle}
+                      onChange={(e) => setDeckTitle(e.target.value)}
+                      placeholder="My Study Deck..."
+                      className="text-xs bg-slate-900/50 border border-slate-700 focus:border-indigo-500 rounded-xl px-3 py-1.5 outline-none text-slate-200"
+                    />
+                    <button
+                      onClick={pushDeckToCloudSync}
+                      disabled={syncingStatus === "syncing"}
+                      className="text-xs text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 border border-indigo-500/20 px-3 py-1.5 rounded-xl transition-all font-semibold inline-flex items-center gap-1.5 cursor-pointer shadow-md"
+                    >
+                      <CloudLightning className="w-3.5 h-3.5" />
+                      Share Globally
+                    </button>
+                    <button
+                      onClick={exportDeckToPDF}
+                      className="text-xs text-white bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 border border-emerald-400/50 shadow-md shadow-emerald-500/20 px-3 py-1.5 rounded-xl transition-all font-bold inline-flex items-center gap-1.5 group cursor-pointer"
+                    >
+                      <Download className="w-3.5 h-3.5 text-white group-hover:scale-110 transition-all" />
+                      Export Deck PDF
+                    </button>
+                    <button
+                      onClick={() => {
+                        triggerConfirm(
+                          "Clear Active Deck",
+                          "Are you sure you want to restore the default flashcards locally? This will replace any custom cards and order you have configured. Click 'Push Finalized Deck to Cloud Sync' afterwards to synchronize this with your cloud profile.",
+                          async () => {
+                            setCards(DEFAULT_CARDS);
+                            setCurrentIdx(0);
+                            showToast("Active deck reset locally to default presets.", "info");
+                          },
+                          "danger",
+                          "Confirm Reset"
+                        );
+                      }}
+                      className="text-xs text-rose-400 bg-rose-500/5 hover:bg-rose-500/15 border border-rose-500/20 hover:border-rose-500/40 px-3 py-1.5 rounded-xl transition-all font-semibold font-mono cursor-pointer"
+                    >
+                      Wipe Deck
+                    </button>
+                  </div>
+                </div>
+
+                {/* Filter and Search Bar */}
+                <div className="relative">
+                  <span className="absolute inset-y-0 left-0 flex items-center pl-3.5 pointer-events-none">
+                    <Search className="h-4 w-4 text-indigo-400/70" />
+                  </span>
+                  <input
+                    type="text"
+                    value={deckSearchQuery}
+                    onChange={(e) => setDeckSearchQuery(e.target.value)}
+                    placeholder="Search cards by term, definition, or hint..."
+                    className="w-full bg-slate-950 border-2 border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 rounded-xl pl-10 pr-10 py-2.5 outline-none text-xs text-slate-200 transition-all font-sans"
+                  />
+                  {deckSearchQuery && (
+                    <button
+                      onClick={() => setDeckSearchQuery("")}
+                      className="absolute inset-y-0 right-0 flex items-center pr-3 text-[10px] text-slate-400 hover:text-slate-200 font-mono font-bold tracking-wider hover:bg-slate-800/40 px-1.5 py-0.5 rounded transition-all"
+                    >
+                      CLEAR
+                    </button>
+                  )}
+                </div>
+
+                {(() => {
+                  if (filteredInventoryCards.length === 0) {
+                    return (
+                      <div className="bg-slate-950/40 border border-slate-900 rounded-xl p-8 text-center space-y-2">
+                        <AlertCircle className="w-8 h-8 text-indigo-400/50 mx-auto" />
+                        <p className="text-slate-300 font-bold text-xs mt-1">No matching cards found</p>
+                        <p className="text-slate-500 text-[11px] font-sans">No cards matched your query "{deckSearchQuery}". Modify your search or clear the filter.</p>
+                        <button
+                          onClick={() => setDeckSearchQuery("")}
+                          className="mt-2 text-xs text-indigo-400 hover:text-indigo-300 border border-indigo-500/20 hover:border-indigo-500/40 bg-indigo-500/5 px-3 py-1 rounded-lg transition-all"
+                        >
+                          Clear Filter
+                        </button>
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <DndContext 
+                      sensors={sensors}
+                      collisionDetection={closestCorners}
+                      onDragEnd={handleDragEnd}
+                    >
+                      <SortableContext 
+                        items={filteredInventoryCards}
+                        strategy={rectSortingStrategy}
+                      >
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
+                          {filteredInventoryCards.map((card) => {
+                            const originalIndex = cards.findIndex(c => c.id === card.id);
+                            return (
+                              <SortableFlashcardItem 
+                                key={card.id} 
+                                card={card} 
+                                originalIndex={originalIndex} 
+                                handleDeleteCard={handleDeleteCard} 
+                                isDark={isDark}
+                                stylesObj={stylesObj}
+                              />
+                            );
+                          })}
+                        </div>
+                      </SortableContext>
+                    </DndContext>
+                  );
+                })()}
+              </div>
+
+              
+              {/* Form entries Split layout columns */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 lg:gap-8">
+                
+                {/* Column left: Setup manually */}
+                <div className="bg-slate-900/40 rounded-2xl border-2 border-slate-800 p-6 md:p-8 space-y-6">
+                  
+
+                  <div className="flex items-center gap-3 border-b border-slate-800/80 pb-3">
+                    <Plus className="w-5 h-5 text-indigo-400" />
+                    <div>
+                      <h4 className="text-base font-bold text-slate-100 font-sans">Add Study Card Manually</h4>
+                      <p className="text-xs text-slate-400 font-sans">Append singular terms and definitions immediately to active local storage</p>
+                    </div>
+                  </div>
+
+                  <form onSubmit={handleAddCard} className="space-y-4">
+                    <div className="space-y-1.5">
+                      <label className="block text-xs uppercase text-slate-400 tracking-wider font-mono font-semibold">New Term / Keyword:</label>
+                      <input
+                        type="text"
+                        value={newTerm}
+                        onChange={(e) => setNewTerm(e.target.value)}
+                        placeholder="e.g., Closure"
+                        className="w-full bg-slate-950 border-2 border-slate-800 focus:border-indigo-500 rounded-xl px-4 py-2.5 outline-none text-xs text-slate-200 transition-all"
+                      />
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="block text-xs uppercase text-slate-400 tracking-wider font-mono font-semibold">Study Definition / Meaning:</label>
+                      <textarea
+                        value={newDefinition}
+                        onChange={(e) => setNewDefinition(e.target.value)}
+                        placeholder="e.g., A function bundled together with references to its surrounding state."
+                        rows={3}
+                        className="w-full bg-slate-950 border-2 border-slate-800 focus:border-indigo-500 rounded-xl px-4 py-2.5 outline-none text-xs text-slate-200 transition-all resize-none font-sans"
+                      />
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="block text-xs uppercase text-slate-400 tracking-wider font-mono font-semibold">Helpful Hint (Optional):</label>
+                      <input
+                        type="text"
+                        value={newHint}
+                        onChange={(e) => setNewHint(e.target.value)}
+                        placeholder="e.g., lexical environment boundaries"
+                        className="w-full bg-slate-950 border-2 border-slate-800 focus:border-indigo-500 rounded-xl px-4 py-2.5 outline-none text-xs text-slate-200 transition-all"
+                      />
+                    </div>
+
+                    <button
+                      type="submit"
+                      className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 rounded-xl text-xs tracking-wider uppercase transition-all cursor-pointer shadow-md border-2 border-indigo-700/50 hover:border-indigo-400"
+                    >
+                      New Flashcard
+                    </button>
+                  </form>
+                </div>
+
+                {/* Column right: Smart Notes Workspace with Dual Extraction Choices */}
+                <div className="bg-slate-900/40 rounded-2xl border-2 border-slate-800 p-6 md:p-8 space-y-6 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center gap-3 border-b border-slate-800/80 pb-3 mb-4">
+                      <Clipboard className="w-5 h-5 text-indigo-400" />
+                      <div>
+                        <h4 className="text-base font-bold text-slate-100 font-sans">Notes & File Ingestion</h4>
+                        <p className="text-xs text-slate-400 font-sans">Import cards from notes, paste contents or upload CSV/Anki exports</p>
+                      </div>
+                    </div>
+
+                    {/* Sub-tab selection controls */}
+                    <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-800/80 mb-4">
+                      <button
+                        type="button"
+                        onClick={() => setImportSubTab("text")}
+                        className={`flex-1 py-1.5 rounded-lg text-xs font-bold uppercase transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                          importSubTab === "text"
+                            ? "bg-indigo-600 text-white shadow-sm"
+                            : "text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        <Clipboard className="w-3.5 h-3.5" />
+                        <span>Paste Notes</span>
+                      </button>
+                      
+                      <button
+                        type="button"
+                        onClick={() => setImportSubTab("file")}
+                        className={`flex-1 py-1.5 rounded-lg text-xs font-bold uppercase transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                          importSubTab === "file"
+                            ? "bg-indigo-600 text-white shadow-sm"
+                            : "text-slate-400 hover:text-slate-100"
+                        }`}
+                      >
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>Upload File</span>
+                      </button>
+                    </div>
+
+                    {importSubTab === "text" ? (
+                      <div className="space-y-4 animate-fade-in text-left">
+                        <div className="space-y-1.5">
+                          <label className="block text-xs uppercase text-slate-400 tracking-wider font-mono font-semibold">Paste Your Raw Study notes here:</label>
+                          <textarea
+                            value={rawNotes}
+                            onChange={(e) => setRawNotes(e.target.value)}
+                            placeholder={`Example (Freeform or split lists):\n- API : Application Programming Interface\n- HTML : Hypertext Markup Language\nOr paste any general paragraphs, lecture slide contents, transcripts, or summaries to let the AI extract definitions!`}
+                            rows={6}
+                            className="w-full bg-slate-950 border-2 border-slate-800 focus:border-indigo-500 rounded-xl px-4 py-3 outline-none text-xs font-mono resize-none leading-relaxed text-slate-200 transition-all"
+                          />
+                        </div>
+
+                        {/* Dual Extraction Choices */}
+                        <div className="space-y-2.5">
+                          <label className="block text-[11px] uppercase text-indigo-200 tracking-wider font-mono font-bold">Choose Extraction Method:</label>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            {/* Option 1: Live Gemini AI parser */}
+                            <button
+                              onClick={runLiveGeminiNotesExtraction}
+                              disabled={geminiStatus.type === "loading"}
+                              className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white py-3 px-4 rounded-xl text-xs font-bold uppercase tracking-wider cursor-pointer border-2 border-indigo-500 hover:border-indigo-300 transition-all flex items-center justify-center gap-2 text-center shadow-lg shadow-indigo-950/20"
+                            >
+                              <Sparkles className="w-4 h-4 text-indigo-200" />
+                              <span>{geminiStatus.type === "loading" ? "Extracting..." : "Extract with Gemini AI"}</span>
+                            </button>
+
+                            {/* Option 2: Smart separation parser */}
+                            <button
+                              onClick={runLocalRegexParser}
+                              className="bg-slate-950 hover:bg-slate-900 text-slate-300 py-3 px-4 rounded-xl text-xs font-bold uppercase tracking-wider cursor-pointer border-2 border-slate-800 hover:border-slate-700 transition-all flex items-center justify-center gap-2 text-center"
+                            >
+                              <Clipboard className="w-4 h-4 text-indigo-400" />
+                              <span>Standard Extract (No AI)</span>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="space-y-4 animate-fade-in text-left">
+                        <div className="space-y-1.5">
+                          <label className="block text-xs uppercase text-slate-400 tracking-wider font-mono font-semibold">Upload Study Deck File:</label>
+                          <div className={`border-4 ${isDark ? "border-slate-800 hover:border-indigo-500/40 bg-slate-950/50" : "border-slate-400 hover:border-indigo-500 bg-white"} rounded-2xl p-6 transition-all flex flex-col items-center justify-center text-center group relative cursor-pointer min-h-[180px]`}>
+                            <input
+                              type="file"
+                              accept=".csv,.txt,.json,.apkg"
+                              onChange={handleImportFile}
+                              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                            />
+                            <div className="space-y-2 flex flex-col items-center">
+                              <div className="p-3 bg-indigo-500/10 border border-indigo-500/20 rounded-2xl text-indigo-400 group-hover:scale-110 duration-200">
+                                <Upload className="w-6 h-6" />
+                              </div>
+                              <div>
+                                <p className="text-xs font-bold text-slate-200">Drag & drop or click to upload</p>
+                                <p className="text-[10px] text-slate-500 mt-1 font-mono">Supports .CSV, .TXT (Anki tab-text), or .JSON</p>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Informative Anki Helper Box */}
+                        <div className="bg-slate-950/40 border-2 border-slate-800/60 p-3.5 rounded-xl text-xs text-slate-400 leading-relaxed font-sans space-y-1">
+                          <p className="font-semibold text-slate-300 flex items-center gap-1">
+                            <AlertCircle className="w-3.5 h-3.5 text-indigo-400 animate-pulse" />
+                            How to import your Anki Decks?
+                          </p>
+                          <p className="text-[11px] text-slate-400">
+                            Anki <code className="text-indigo-300 font-mono">.apkg</code> files are packed binary SQLite database archives. The most portable, standard way to study them here is to export card decks in Anki via <strong className="text-slate-300 font-medium">File &gt; Export</strong> as <strong className="text-slate-300 font-medium">Notes in Plain Text (*.txt)</strong> or <strong className="text-slate-300 font-medium">CSV</strong>, and upload that file here. We parse tab-separated and CSV Anki exports instantly!
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="mt-4 pt-2">
+                    {parseLogs && (
+                      <div className="text-xs font-mono text-indigo-300 bg-indigo-500/10 px-4 py-3 rounded-xl border border-indigo-500/20 whitespace-pre-wrap leading-relaxed animate-fade-in mb-3">
+                        {parseLogs}
+                      </div>
+                    )}
+
+                    {geminiStatus.msg && (
+                      <div className={`text-xs font-mono px-4 py-3 rounded-xl border-2 leading-relaxed animate-fade-in ${
+                        geminiStatus.type === "error" 
+                          ? "bg-rose-500/5 text-rose-300 border-rose-500/30" 
+                          : geminiStatus.type === "success" 
+                          ? "bg-emerald-500/5 text-emerald-300 border-emerald-500/30" 
+                          : "bg-slate-950 text-indigo-400 border-indigo-500/20"
+                      }`}>
+                        {geminiStatus.msg}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+              </div>
               
               {/* Gemini API Key Universal Config Bar */}
               <div className="bg-slate-900/60 rounded-2xl border-2 border-slate-800 p-5 md:p-6 space-y-4">
                 <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                   <div className="space-y-1">
                     <h4 className="text-sm font-bold text-slate-100 flex items-center gap-2">
-                      <Sparkles className="w-4 h-4 text-indigo-400 animate-pulse" />
+                       <Sparkles className="w-4 h-4 text-indigo-400 animate-pulse" />
                       Google Gemini AI Engine Credentials
                     </h4>
                     <p className="text-xs text-slate-400 font-sans">
@@ -3129,335 +3427,6 @@ To import Anki cards:
                   </div>
 
                 </div>
-              </div>
-
-              {/* Form entries Split layout columns */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 lg:gap-8">
-                
-                {/* Column left: Setup manually */}
-                <div className="bg-slate-900/40 rounded-2xl border-2 border-slate-800 p-6 md:p-8 space-y-6">
-                  
-
-
-                  <div className="flex items-center gap-3 border-b border-slate-800/80 pb-3">
-                    <Plus className="w-5 h-5 text-indigo-400" />
-                    <div>
-                      <h4 className="text-base font-bold text-slate-100 font-sans">Add Study Card Manually</h4>
-                      <p className="text-xs text-slate-400 font-sans">Append singular terms and definitions immediately to active local storage</p>
-                    </div>
-                  </div>
-
-                  <form onSubmit={handleAddCard} className="space-y-4">
-                    <div className="space-y-1.5">
-                      <label className="block text-xs uppercase text-slate-400 tracking-wider font-mono font-semibold">New Term / Keyword:</label>
-                      <input
-                        type="text"
-                        value={newTerm}
-                        onChange={(e) => setNewTerm(e.target.value)}
-                        placeholder="e.g., Closure"
-                        className="w-full bg-slate-950 border-2 border-slate-800 focus:border-indigo-500 rounded-xl px-4 py-2.5 outline-none text-xs text-slate-200 transition-all"
-                      />
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="block text-xs uppercase text-slate-400 tracking-wider font-mono font-semibold">Study Definition / Meaning:</label>
-                      <textarea
-                        value={newDefinition}
-                        onChange={(e) => setNewDefinition(e.target.value)}
-                        placeholder="e.g., A function bundled together with references to its surrounding state."
-                        rows={3}
-                        className="w-full bg-slate-950 border-2 border-slate-800 focus:border-indigo-500 rounded-xl px-4 py-2.5 outline-none text-xs text-slate-200 transition-all resize-none font-sans"
-                      />
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="block text-xs uppercase text-slate-400 tracking-wider font-mono font-semibold">Helpful Hint (Optional):</label>
-                      <input
-                        type="text"
-                        value={newHint}
-                        onChange={(e) => setNewHint(e.target.value)}
-                        placeholder="e.g., lexical environment boundaries"
-                        className="w-full bg-slate-950 border-2 border-slate-800 focus:border-indigo-500 rounded-xl px-4 py-2.5 outline-none text-xs text-slate-200 transition-all"
-                      />
-                    </div>
-
-                    <button
-                      type="submit"
-                      className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 rounded-xl text-xs tracking-wider uppercase transition-all cursor-pointer shadow-md border-2 border-indigo-700/50 hover:border-indigo-400"
-                    >
-                      Append Card To Deck
-                    </button>
-                  </form>
-                </div>
-
-                {/* Column right: Smart Notes Workspace with Dual Extraction Choices */}
-                <div className="bg-slate-900/40 rounded-2xl border-2 border-slate-800 p-6 md:p-8 space-y-6 flex flex-col justify-between">
-                  <div>
-                    <div className="flex items-center gap-3 border-b border-slate-800/80 pb-3 mb-4">
-                      <Clipboard className="w-5 h-5 text-indigo-400" />
-                      <div>
-                        <h4 className="text-base font-bold text-slate-100 font-sans">Notes & File Ingestion</h4>
-                        <p className="text-xs text-slate-400 font-sans">Import cards from notes, paste contents or upload CSV/Anki exports</p>
-                      </div>
-                    </div>
-
-                    {/* Sub-tab selection controls */}
-                    <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-800/80 mb-4">
-                      <button
-                        type="button"
-                        onClick={() => setImportSubTab("text")}
-                        className={`flex-1 py-1.5 rounded-lg text-xs font-bold uppercase transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-                          importSubTab === "text"
-                            ? "bg-indigo-600 text-white shadow-sm"
-                            : "text-slate-400 hover:text-slate-200"
-                        }`}
-                      >
-                        <Clipboard className="w-3.5 h-3.5" />
-                        <span>Paste Notes</span>
-                      </button>
-                      
-                      <button
-                        type="button"
-                        onClick={() => setImportSubTab("file")}
-                        className={`flex-1 py-1.5 rounded-lg text-xs font-bold uppercase transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-                          importSubTab === "file"
-                            ? "bg-indigo-600 text-white shadow-sm"
-                            : "text-slate-400 hover:text-slate-100"
-                        }`}
-                      >
-                        <Upload className="w-3.5 h-3.5" />
-                        <span>Upload File</span>
-                      </button>
-                    </div>
-
-                    {importSubTab === "text" ? (
-                      <div className="space-y-4 animate-fade-in text-left">
-                        <div className="space-y-1.5">
-                          <label className="block text-xs uppercase text-slate-400 tracking-wider font-mono font-semibold">Paste Your Raw Study notes here:</label>
-                          <textarea
-                            value={rawNotes}
-                            onChange={(e) => setRawNotes(e.target.value)}
-                            placeholder={`Example (Freeform or split lists):\n- API : Application Programming Interface\n- HTML : Hypertext Markup Language\nOr paste any general paragraphs, lecture slide contents, transcripts, or summaries to let the AI extract definitions!`}
-                            rows={6}
-                            className="w-full bg-slate-950 border-2 border-slate-800 focus:border-indigo-500 rounded-xl px-4 py-3 outline-none text-xs font-mono resize-none leading-relaxed text-slate-200 transition-all"
-                          />
-                        </div>
-
-                        {/* Dual Extraction Choices */}
-                        <div className="space-y-2.5">
-                          <label className="block text-[11px] uppercase text-indigo-200 tracking-wider font-mono font-bold">Choose Extraction Method:</label>
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                            {/* Option 1: Live Gemini AI parser */}
-                            <button
-                              onClick={runLiveGeminiNotesExtraction}
-                              disabled={geminiStatus.type === "loading"}
-                              className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white py-3 px-4 rounded-xl text-xs font-bold uppercase tracking-wider cursor-pointer border-2 border-indigo-500 hover:border-indigo-300 transition-all flex items-center justify-center gap-2 text-center shadow-lg shadow-indigo-950/20"
-                            >
-                              <Sparkles className="w-4 h-4 text-indigo-200" />
-                              <span>{geminiStatus.type === "loading" ? "Extracting..." : "Extract with Gemini AI"}</span>
-                            </button>
-
-                            {/* Option 2: Smart separation parser */}
-                            <button
-                              onClick={runLocalRegexParser}
-                              className="bg-slate-950 hover:bg-slate-900 text-slate-300 py-3 px-4 rounded-xl text-xs font-bold uppercase tracking-wider cursor-pointer border-2 border-slate-800 hover:border-slate-700 transition-all flex items-center justify-center gap-2 text-center"
-                            >
-                              <Clipboard className="w-4 h-4 text-indigo-400" />
-                              <span>Standard Extract (No AI)</span>
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="space-y-4 animate-fade-in text-left">
-                        <div className="space-y-1.5">
-                          <label className="block text-xs uppercase text-slate-400 tracking-wider font-mono font-semibold">Upload Study Deck File:</label>
-                          <div className={`border-4 ${isDark ? "border-slate-800 hover:border-indigo-500/40 bg-slate-950/50" : "border-slate-400 hover:border-indigo-500 bg-white"} rounded-2xl p-6 transition-all flex flex-col items-center justify-center text-center group relative cursor-pointer min-h-[180px]`}>
-                            <input
-                              type="file"
-                              accept=".csv,.txt,.json,.apkg"
-                              onChange={handleImportFile}
-                              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
-                            />
-                            <div className="space-y-2 flex flex-col items-center">
-                              <div className="p-3 bg-indigo-500/10 border border-indigo-500/20 rounded-2xl text-indigo-400 group-hover:scale-110 duration-200">
-                                <Upload className="w-6 h-6" />
-                              </div>
-                              <div>
-                                <p className="text-xs font-bold text-slate-200">Drag & drop or click to upload</p>
-                                <p className="text-[10px] text-slate-500 mt-1 font-mono">Supports .CSV, .TXT (Anki tab-text), or .JSON</p>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Informative Anki Helper Box */}
-                        <div className="bg-slate-950/40 border-2 border-slate-800/60 p-3.5 rounded-xl text-xs text-slate-400 leading-relaxed font-sans space-y-1">
-                          <p className="font-semibold text-slate-300 flex items-center gap-1">
-                            <AlertCircle className="w-3.5 h-3.5 text-indigo-400 animate-pulse" />
-                            How to import your Anki Decks?
-                          </p>
-                          <p className="text-[11px] text-slate-400">
-                            Anki <code className="text-indigo-300 font-mono">.apkg</code> files are packed binary SQLite database archives. The most portable, standard way to study them here is to export card decks in Anki via <strong className="text-slate-300 font-medium">File &gt; Export</strong> as <strong className="text-slate-300 font-medium">Notes in Plain Text (*.txt)</strong> or <strong className="text-slate-300 font-medium">CSV</strong>, and upload that file here. We parse tab-separated and CSV Anki exports instantly!
-                          </p>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="mt-4 pt-2">
-                    {parseLogs && (
-                      <div className="text-xs font-mono text-indigo-300 bg-indigo-500/10 px-4 py-3 rounded-xl border border-indigo-500/20 whitespace-pre-wrap leading-relaxed animate-fade-in mb-3">
-                        {parseLogs}
-                      </div>
-                    )}
-
-                    {geminiStatus.msg && (
-                      <div className={`text-xs font-mono px-4 py-3 rounded-xl border-2 leading-relaxed animate-fade-in ${
-                        geminiStatus.type === "error" 
-                          ? "bg-rose-500/5 text-rose-300 border-rose-500/30" 
-                          : geminiStatus.type === "success" 
-                          ? "bg-emerald-500/5 text-emerald-300 border-emerald-500/30" 
-                          : "bg-slate-950 text-indigo-400 border-indigo-500/20"
-                      }`}>
-                        {geminiStatus.msg}
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-              </div>
-
-
-
-              {/* Deck lists inventory manager */}
-              <div className={`${stylesObj.panelBg} rounded-2xl border p-6 space-y-4`}>
-                <div className={`flex justify-between items-center flex-wrap gap-4 border-b ${stylesObj.border} pb-4`}>
-                  <div>
-                    <h4 className={`text-base font-bold ${stylesObj.textHeading} flex items-center gap-1.5`}>
-                      <FileText className="w-5 h-5 text-indigo-500 dark:text-indigo-400" /> Deck Inventory Configuration
-                    </h4>
-                    <p className={`text-xs ${stylesObj.textMuted} font-sans`}>Review, modify, or eliminate generated card listings</p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={exportDeckToPDF}
-                      className="text-xs text-indigo-300 bg-indigo-500/5 hover:bg-indigo-500/15 border border-indigo-500/20 hover:border-indigo-500/40 px-3 py-1.5 rounded-xl transition-all font-semibold inline-flex items-center gap-1.5 group cursor-pointer"
-                    >
-                      <Download className="w-3.5 h-3.5 text-indigo-400 group-hover:scale-110 transition-all" />
-                      Export Deck PDF
-                    </button>
-                    <button
-                      onClick={() => {
-                        triggerConfirm(
-                          "Clear Active Deck",
-                          "Are you sure you want to restore the default flashcards? This will replace any custom cards and order you have configured.",
-                          async () => {
-                            setCards(DEFAULT_CARDS);
-                            setCurrentIdx(0);
-                            showToast("Active deck reset to default presets.", "info");
-                            if (user) {
-                              try {
-                                const q = query(collection(db, "cards"), where("userId", "==", user.uid));
-                                const snapshot = await getDocs(q);
-                                for (const d of snapshot.docs) {
-                                  await deleteDoc(d.ref);
-                                }
-                                await dbAddMultipleCards(DEFAULT_CARDS);
-                              } catch (e) {
-                                console.error("Cloud deck reset failed: ", e);
-                              }
-                            }
-                          },
-                          "danger",
-                          "Confirm Reset"
-                        );
-                      }}
-                      className="text-xs text-rose-400 bg-rose-500/5 hover:bg-rose-500/15 border border-rose-500/20 hover:border-rose-500/40 px-3 py-1.5 rounded-xl transition-all font-semibold font-mono cursor-pointer"
-                    >
-                      Clear All Cards
-                    </button>
-                  </div>
-                </div>
-
-                {/* Filter and Search Bar */}
-                <div className="relative">
-                  <span className="absolute inset-y-0 left-0 flex items-center pl-3.5 pointer-events-none">
-                    <Search className="h-4 w-4 text-indigo-400/70" />
-                  </span>
-                  <input
-                    type="text"
-                    value={deckSearchQuery}
-                    onChange={(e) => setDeckSearchQuery(e.target.value)}
-                    placeholder="Search cards by term, definition, or hint..."
-                    className="w-full bg-slate-950 border-2 border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 rounded-xl pl-10 pr-10 py-2.5 outline-none text-xs text-slate-200 transition-all font-sans"
-                  />
-                  {deckSearchQuery && (
-                    <button
-                      onClick={() => setDeckSearchQuery("")}
-                      className="absolute inset-y-0 right-0 flex items-center pr-3 text-[10px] text-slate-400 hover:text-slate-200 font-mono font-bold tracking-wider hover:bg-slate-800/40 px-1.5 py-0.5 rounded transition-all"
-                    >
-                      CLEAR
-                    </button>
-                  )}
-                </div>
-
-                {(() => {
-                  const query = deckSearchQuery.trim().toLowerCase();
-                  const filteredCards = cards.filter(card => {
-                    if (!query) return true;
-                    return (
-                      card.term.toLowerCase().includes(query) ||
-                      card.definition.toLowerCase().includes(query) ||
-                      (card.hint && card.hint.toLowerCase().includes(query))
-                    );
-                  });
-
-                  if (filteredCards.length === 0) {
-                    return (
-                      <div className="bg-slate-950/40 border border-slate-900 rounded-xl p-8 text-center space-y-2">
-                        <AlertCircle className="w-8 h-8 text-indigo-400/50 mx-auto" />
-                        <p className="text-slate-300 font-bold text-xs mt-1">No matching cards found</p>
-                        <p className="text-slate-500 text-[11px] font-sans">No cards matched your query "{deckSearchQuery}". Modify your search or clear the filter.</p>
-                        <button
-                          onClick={() => setDeckSearchQuery("")}
-                          className="mt-2 text-xs text-indigo-400 hover:text-indigo-300 border border-indigo-500/20 hover:border-indigo-500/40 bg-indigo-500/5 px-3 py-1 rounded-lg transition-all"
-                        >
-                          Clear Filter
-                        </button>
-                      </div>
-                    );
-                  }
-
-                  return (
-                    <DndContext 
-                      sensors={sensors}
-                      collisionDetection={closestCorners}
-                      onDragEnd={handleDragEnd}
-                    >
-                      <SortableContext 
-                        items={filteredCards}
-                        strategy={rectSortingStrategy}
-                      >
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
-                          {filteredCards.map((card) => {
-                            const originalIndex = cards.findIndex(c => c.id === card.id);
-                            return (
-                              <SortableFlashcardItem 
-                                key={card.id} 
-                                card={card} 
-                                originalIndex={originalIndex} 
-                                handleDeleteCard={handleDeleteCard} 
-                                isDark={isDark}
-                                stylesObj={stylesObj}
-                              />
-                            );
-                          })}
-                        </div>
-                      </SortableContext>
-                    </DndContext>
-                  );
-                })()}
               </div>
 
             </div>

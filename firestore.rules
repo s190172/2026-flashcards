@@ -34,17 +34,19 @@ service cloud.firestore {
     
     // 2. Validation Blueprints for Flashcard Entity
     function isValidCard(data) {
-      return data.keys().hasAll(['id', 'userId', 'term', 'definition'])
-        && data.keys().size() <= 12
+      return (data.keys().hasAll(['id', 'userId', 'term', 'definition']) || data.keys().hasAll(['id', 'authorId', 'term', 'definition']))
+        && data.keys().size() <= 14
         && data.id is string && data.id.size() <= 128
-        && data.userId == request.auth.uid
-        && data.term is string && data.term.size() >= 1 && data.term.size() <= 2000
-        && data.definition is string && data.definition.size() >= 1 && data.definition.size() <= 8000
-        && (!('hint' in data) || (data.hint is string && data.hint.size() <= 2000))
+        && (!('userId' in data) || data.userId == request.auth.uid)
+        && (!('authorId' in data) || data.authorId == request.auth.uid)
+        && data.term is string && data.term.size() >= 1 && data.term.size() <= 2005
+        && data.definition is string && data.definition.size() >= 1 && data.definition.size() <= 8005
+        && (!('hint' in data) || (data.hint is string && data.hint.size() <= 2005))
         && (!('confidence' in data) || (data.confidence is string && (data.confidence == 'hard' || data.confidence == 'good' || data.confidence == 'easy' || data.confidence == '')))
         && (!('interval' in data) || (data.interval is int || data.interval is float))
         && (!('ease_factor' in data) || (data.ease_factor is int || data.ease_factor is float))
         && (!('next_review_date' in data) || data.next_review_date is string)
+        && (!('isMastered' in data) || data.isMastered is bool)
         && (!('searchKeywords' in data) || data.searchKeywords is list);
     }
 
@@ -65,20 +67,37 @@ service cloud.firestore {
         
       allow get: if isSignedIn()
         && isValidId(cardId)
-        && existing().userId == request.auth.uid;
+        && (existing().userId == request.auth.uid || (('authorId' in existing()) && existing().authorId == request.auth.uid));
         
       allow list: if isSignedIn()
-        && existing().userId == request.auth.uid;
+        && (existing().userId == request.auth.uid || (('authorId' in existing()) && existing().authorId == request.auth.uid));
         
       allow update: if isSignedIn()
         && isValidId(cardId)
         && isValidCard(incoming())
-        && incoming().userId == existing().userId
+        && (!('userId' in existing()) || incoming().userId == existing().userId)
+        && (!('authorId' in existing()) || incoming().authorId == existing().authorId)
         && incoming().id == existing().id;
         
       allow delete: if isSignedIn()
         && isValidId(cardId)
-        && existing().userId == request.auth.uid;
+        && (existing().userId == request.auth.uid || (('authorId' in existing()) && existing().authorId == request.auth.uid));
+    }
+    
+    // 3. Collection Match Rules: Users (daily study sessions bundle)
+    match /users/{userId} {
+      allow get: if isOwner(userId)
+        && isValidId(userId);
+        
+      allow list: if isOwner(userId)
+        && isValidId(userId);
+      
+      allow create, update: if isOwner(userId)
+        && isValidId(userId)
+        && incoming().userId == userId;
+        
+      allow delete: if isOwner(userId)
+        && isValidId(userId);
     }
     
     // 3. Collection Match Rules: User stats

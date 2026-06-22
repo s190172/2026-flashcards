@@ -6,6 +6,13 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
+console.log("Server environment VITE_FIREBASE_ keys:", 
+  Object.keys(process.env).filter(k => k.startsWith("VITE_FIREBASE_")),
+  "FIREBASE_ keys:",
+  Object.keys(process.env).filter(k => k.startsWith("FIREBASE_")),
+  "PROJECT_ID:", process.env.VITE_FIREBASE_PROJECT_ID || process.env.FIREBASE_PROJECT_ID || "none"
+);
+
 const app = express();
 const PORT = 3000;
 
